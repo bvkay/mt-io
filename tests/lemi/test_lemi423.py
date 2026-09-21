@@ -82,3 +82,31 @@ class TestHeader:
         fn = write_b423(tmp_path / "1624510579.B423", alt_line="%Alt1060.0,m 12 1")
         run = read_lemi423(fn)
         assert run.station_metadata.location.elevation == pytest.approx(1060.0)
+
+
+class TestCollection:
+    def test_b423_listed_by_default(self, tmp_path):
+        """A LEMI-423 folder lists its files without naming the rate"""
+        from mt_io.lemi import LEMICollection
+
+        for k in range(2):
+            write_b423(tmp_path / f"{1624510579 + 2 * k}.B423", epoch=1624510579 + 2 * k)
+        lc = LEMICollection(tmp_path, file_ext=["B423"])
+        df = lc.to_dataframe()
+        assert len(df) == 2
+        assert set(df.sample_rate) == {1000.0}
+        assert df.run.nunique() == 1
+
+    def test_other_rates_are_counted(self, tmp_path):
+        from mt_io.lemi import LEMICollection
+
+        write_b423(tmp_path / "1624510579.B423")
+        lc = LEMICollection(tmp_path, file_ext=["B423"])
+        messages = []
+        handler = lc.logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            df = lc.to_dataframe(sample_rates=[1])
+        finally:
+            lc.logger.remove(handler)
+        assert len(df) == 0
+        assert any("1 at 1000.0 Hz" in m for m in messages), messages

@@ -184,8 +184,11 @@ class LEMICollection(Collection):
         Parameters
         ----------
         sample_rates : int or list of int, optional
-            - LEMI-424: Use [1] (always 1 Hz)
-            - LEMI-423: List which rate(s) to include. Sample rate is auto-detected from each file's tick counter.
+            Rates to keep, by default None, which keeps every file whatever
+            its rate. Files at other rates are left out, with one warning
+            that counts them by rate.
+            - LEMI-424: [1] (always 1 Hz)
+            - LEMI-423: the rate is detected from each file's tick counter.
                 - If you know the rate was 1000 Hz: [1000]
                 - To include all possible rates: [4000, 2000, 1000, 500, 250]
         run_name_zeros : int, optional
@@ -223,8 +226,8 @@ class LEMICollection(Collection):
         >>> lc = LEMICollection("/path/to/single/lemi/station")
         >>> lemi_df = lc.to_dataframe()
         """
-        if sample_rates is None:
-            sample_rates = [1]
+        if isinstance(sample_rates, (int, float)):
+            sample_rates = [sample_rates]
 
         if calibration_path is None:
             calibration_path = Path(self.file_path)
@@ -236,6 +239,7 @@ class LEMICollection(Collection):
             )
 
         entries = []
+        skipped = {}
         for fn in self.get_files(self.file_ext):
             fn_path = pathlib.Path(fn)
 
@@ -299,7 +303,8 @@ class LEMICollection(Collection):
                 continue
 
             # Filter by sample rate
-            if sample_rate not in sample_rates:
+            if sample_rates is not None and sample_rate not in sample_rates:
+                skipped[sample_rate] = skipped.get(sample_rate, 0) + 1
                 continue
 
             entry = self.get_empty_entry_dict()
@@ -316,6 +321,15 @@ class LEMICollection(Collection):
             entry["dipole"] = [self.dipole_length_ex, self.dipole_length_ey]
 
             entries.append(entry)
+
+        if skipped:
+            counts = ", ".join(
+                f"{n} at {rate} Hz" for rate, n in skipped.items()
+            )
+            self.logger.warning(
+                f"Skipped {sum(skipped.values())} file(s) not in sample_rates "
+                f"{list(sample_rates)}: {counts}"
+            )
 
         # make pandas dataframe and set data types
         if len(entries) == 0:
