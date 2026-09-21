@@ -62,7 +62,8 @@ class Read_Lemi_Header:
     **Lines 9-11: Geographic Location**
         - Line 9: ``%Lat 2944.90064,S`` (latitude in DDMM.MMMMM format, N/S)
         - Line 10: ``%Lon 13900.11658,E`` (longitude in DDDMM.MMMMM format, E/W)
-        - Line 11: ``%Alt 119.9,m 12 2`` (altitude in meters)
+        - Line 11: ``%Alt 119.9,m 12 2`` (altitude in meters); from 1000 m
+          up there is no space after the tag, ``%Alt1060.0,m 12 1``
 
     **Line 12: (blank)**
 
@@ -152,7 +153,9 @@ class Read_Lemi_Header:
         self.longitude = (int(lon[:3]) + float(lon[3:]) / 60) * (
             -1 if lon_dir.strip() == "W" else 1
         )
-        self.elevation = float(header[11].split(",")[0].split()[-1])
+        # firmware 2.1 writes the altitude in a fixed width field, so a four
+        # digit value runs into the tag: "%Alt1060.0,m 12 1"
+        self.elevation = float(header[11].split(",")[0].replace("%Alt", "").strip())
 
     def read(self) -> Dict:
         header = self._read_header()
