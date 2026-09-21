@@ -313,6 +313,11 @@ def read_lemi_coil_response(calibration_fn, coil_number=None):
     """
     Read LEMI-120 coil calibration from .rsp file.
 
+    The .rsp amplitudes are normalized, about 1 in the pass band, so the
+    table is the shape of the response, nanoTesla to nanoTesla. It sits
+    ahead of the linear calibration, whose K coefficient takes the channel
+    from nanoTesla to counts.
+
     :param calibration_fn: Path to .rsp calibration file
     :type calibration_fn: str or Path
     :param coil_number: Optional coil serial number
@@ -332,8 +337,8 @@ def read_lemi_coil_response(calibration_fn, coil_number=None):
     fap.frequencies = cal_data[:, 0]  # Hz
     fap.amplitudes = cal_data[:, 1]  # Normalized
     fap.phases = np.deg2rad(cal_data[:, 2])  # Convert degrees to radians
-    fap.units_in = "nanotesla"
-    fap.units_out = "millivolts"
+    fap.units_in = "nanoTesla"
+    fap.units_out = "nanoTesla"
     fap.name = (
         f"lemi_120_{coil_number}_response" if coil_number else "lemi_120_response"
     )
@@ -423,9 +428,10 @@ class LEMI423Reader:
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 0)
         * **station_id** (str) - Station identifier (optional)
 
-    **Filter Chain**:
-        - All channels: linear calibration (counts -> nT or V)
-        - Magnetic (optional): LEMI-120 coil response (nT -> mV)
+    **Filter Chain** (physical to recorded):
+        - Magnetic (optional): LEMI-120 coil response (nT -> nT, normalized)
+        - Electric (optional): dipole length (mV/km -> uV)
+        - All channels: linear calibration (nT or uV -> counts)
     """
 
     def __init__(self, files: List[Union[str, Path]], **kwargs):
@@ -741,10 +747,23 @@ class LEMI423Reader:
             series = full[src].to_numpy()
             ch_metadata = self._get_channel_metadata(code, ch_num)
 
-            # **NEW**: Create calibration filter chain (following MTH5 standard)
-            # All channels get linear calibration filter (counts -> physical units)
-            # Magnetic channels optionally get LEMI-120 coil response if calibration_fn provided
+            # Filter chain, ordered physical to recorded: the LEMI-120 coil
+            # response (magnetic, when calibration_fn is given) or the dipole
+            # (electric), then the linear calibration to counts
             filters_list = []
+
+            if code in ["hx", "hy", "hz"] and self.calibration_fn is not None:
+                # Get instrument number for coil ID
+                coil_id = None
+                if self.header:
+                    instrument_num = self.header.get("instrument_number", "")
+                    coil_id = str(instrument_num) if instrument_num else None
+
+                # Read LEMI-120 coil response filter from .rsp file
+                coil_filter = read_lemi_coil_response(
+                    self.calibration_fn, coil_number=coil_id
+                )
+                filters_list.append(coil_filter)
 
             # Get calibration coefficients from header
             if self.header:
@@ -786,20 +805,6 @@ class LEMI423Reader:
                     filters_list.append(
                         create_lemi423_linear_calibration_filter(code, k_val, a_val)
                     )
-
-            # Add LEMI-120 coil response for magnetic channels (if provided)
-            if code in ["hx", "hy", "hz"] and self.calibration_fn is not None:
-                # Get instrument number for coil ID
-                coil_id = None
-                if self.header:
-                    instrument_num = self.header.get("instrument_number", "")
-                    coil_id = str(instrument_num) if instrument_num else None
-
-                # Read LEMI-120 coil response filter from .rsp file
-                coil_filter = read_lemi_coil_response(
-                    self.calibration_fn, coil_number=coil_id
-                )
-                filters_list.append(coil_filter)
 
             # Create ChannelResponse with all filters
             channel_response = None
@@ -848,8 +853,8 @@ class LEMI120CoilResponse:
         fap.frequencies = self._calibration_data[:, 0]
         fap.amplitudes = self._calibration_data[:, 1]
         fap.phases = self._calibration_data[:, 2]
-        fap.units_in = "nanotesla"
-        fap.units_out = "mV"
+        fap.units_in = "nanoTesla"
+        fap.units_out = "nanoTesla"
         fap.type = "frequency response table"
         fap.name = (
             f"lemi_120_{coil_number}_response" if coil_number else "lemi_120_response"

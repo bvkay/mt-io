@@ -147,3 +147,51 @@ class TestSampleRate:
         run, messages = self._warnings(lambda: read_lemi423(fn))
         assert run.run_metadata.sample_rate == 1.0
         assert any("taken from the time stamps" in m for m in messages)
+
+
+def write_rsp(path: Path) -> Path:
+    """A normalized coil response: amplitude 1 in the pass band"""
+    freqs = np.logspace(-3, 3, 25)
+    amps = freqs / np.sqrt(freqs**2 + 0.01)
+    phases = np.degrees(np.arctan2(0.1, freqs))
+    body = "\n".join(f"{f:.6e} {a:.6e} {p:.6e}" for f, a, p in zip(freqs, amps, phases))
+    path.write_text("B\nfreq amp phas\n" + body + "\n")
+    return path
+
+
+class TestCoilResponse:
+    def test_units_pass_validation(self, tmp_path):
+        from mt_io.lemi.lemi423 import read_lemi_coil_response
+
+        fap = read_lemi_coil_response(write_rsp(tmp_path / "l120n.rsp"), "36")
+        assert fap.units_in == "nanoTesla"
+        assert fap.units_out == "nanoTesla"
+
+    def test_chain_with_coil_response(self, tmp_path):
+        """calibration_fn gives hx a valid chain: coil, then linear"""
+        fn = write_b423(tmp_path / "1624510579.B423")
+        rsp = write_rsp(tmp_path / "l120n.rsp")
+        run = read_lemi423(fn, calibration_fn=rsp, dipole_length_ex=50.0)
+
+        hx = run.hx
+        response = hx.channel_response
+        assert response.names == ["lemi_120_36_response", "lemi423_linear_hx"]
+        assert response.units_in == "nanoTesla"
+        assert response.units_out == "digital counts"
+        stages = {f.name: f.stage for f in hx.channel_metadata.filters}
+        assert stages == {"lemi_120_36_response": 1, "lemi423_linear_hx": 2}
+
+        # the product is the coil table times 1/K whatever the order
+        from mt_io.lemi.lemi423 import read_lemi_coil_response
+
+        f = np.array([0.5, 5.0, 50.0])
+        coil = read_lemi_coil_response(rsp).complex_response(f)
+        np.testing.assert_allclose(
+            response.complex_response(f), coil / 2.909985e-06, rtol=1e-12
+        )
+        np.testing.assert_allclose(np.abs(coil[1:]), 1.0, rtol=1e-3)
+
+        assert run.ex.channel_response.names == [
+            "lemi423_dipole_ex_50.0m",
+            "lemi423_linear_ex",
+        ]
