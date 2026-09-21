@@ -248,6 +248,26 @@ class Read_Lemi_Data:
             "check the instrument"
         )
 
+    @staticmethod
+    def _time_index(seconds: np.ndarray, ticks: np.ndarray) -> pd.DatetimeIndex:
+        """
+        Time plus tick as a UTC index.
+
+        Gives the values and resolution of ``pd.to_datetime(seconds, unit="s",
+        utc=True) + pd.to_timedelta(ticks, unit="ms")``, which pandas works
+        out on the first record, but builds them as integer milliseconds.
+        """
+        probe = pd.to_datetime(seconds[:1], unit="s", utc=True) + pd.to_timedelta(
+            ticks[:1], unit="ms"
+        )
+        ms = seconds.astype(np.int64)
+        ms *= 1000
+        ms += ticks
+        values = ms.view("datetime64[ms]")
+        if probe.unit != "ms":
+            values = values.astype(f"datetime64[{probe.unit}]")
+        return pd.DatetimeIndex(values, name="time").tz_localize(probe.tz)
+
     def read_dataframe(self) -> pd.DataFrame:
         with open(self.binary_file, "rb") as f:
             f.read(1024)  # skip header
@@ -257,22 +277,21 @@ class Read_Lemi_Data:
                 pd.DatetimeIndex([], tz="UTC", name="time")
             )
 
-        df = pd.DataFrame(arr)
-
         # Determine sample rate from tick counter range
         # Tick resets to 0 when timestamp increments, so max(tick) + 1 = sample rate
-        tick_max = df["tick"].max()
+        tick_max = arr["tick"].max()
         self.sample_rate = float(tick_max + 1) if tick_max > 0 else None
         if self.sample_rate is None:
             self._warn_no_rate(arr["time"])
 
-        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True) + pd.to_timedelta(
-            df["tick"], unit="ms"
+        # Return RAW counts (no calibration applied), in time order
+        df = pd.DataFrame(
+            {name: arr[name] for name in ("Bx", "By", "Bz", "Ex", "Ey")},
+            index=self._time_index(arr["time"], arr["tick"]),
         )
-        df.set_index("time", inplace=True)
-
-        # Return RAW counts (no calibration applied)
-        return df[["Bx", "By", "Bz", "Ex", "Ey"]].sort_index()
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+        return df
 
     def read_summary(self) -> dict:
         """
@@ -697,10 +716,14 @@ class LEMI423Reader:
         # Store first header as the primary metadata source
         self.header = headers[0]
 
-        # Concatenate on time index
-        full = pd.concat(parts).sort_index()
-        # Drop exact duplicates
-        full = full[~full.index.duplicated(keep="first")]
+        # Concatenate on time index. Files in order with no overlap need
+        # neither the sort nor the duplicate search.
+        full = parts[0] if len(parts) == 1 else pd.concat(parts)
+        stamps = full.index.asi8
+        if not (np.diff(stamps) > 0).all():
+            full = full.sort_index()
+            # Drop exact duplicates
+            full = full[~full.index.duplicated(keep="first")]
 
         # Store the full dataframe
         self.data = full

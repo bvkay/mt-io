@@ -195,3 +195,42 @@ class TestCoilResponse:
             "lemi423_dipole_ex_50.0m",
             "lemi423_linear_ex",
         ]
+
+
+def pandas_frame(fn: Path) -> pd.DataFrame:
+    """The records as the reader built them with pandas arithmetic"""
+    with open(fn, "rb") as f:
+        f.read(1024)
+        df = pd.DataFrame(np.fromfile(f, dtype=RECORD))
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True) + pd.to_timedelta(
+        df["tick"], unit="ms"
+    )
+    df.set_index("time", inplace=True)
+    return df[["Bx", "By", "Bz", "Ex", "Ey"]].sort_index()
+
+
+class TestVectorisedRead:
+    def _shuffle(self, fn, seed=3):
+        n = (fn.stat().st_size - 1024) // RECORD.itemsize
+        arr = np.memmap(fn, dtype=RECORD, mode="r+", offset=1024, shape=(n,))
+        arr[:] = arr[np.random.default_rng(seed).permutation(n)]
+        arr.flush()
+        del arr
+
+    @pytest.mark.parametrize("shuffle", [False, True])
+    def test_same_frame_as_pandas(self, tmp_path, shuffle):
+        fn = write_b423(tmp_path / "1624510579.B423", n=3000)
+        if shuffle:
+            self._shuffle(fn)
+        got = Read_Lemi_Data(fn, {}).read_dataframe()
+        want = pandas_frame(fn)
+        assert got.index.dtype == want.index.dtype
+        pd.testing.assert_frame_equal(got, want, check_exact=True)
+
+    def test_files_out_of_order(self, tmp_path):
+        a = write_b423(tmp_path / "1624510579.B423", n=3000)
+        b = write_b423(tmp_path / "1624510582.B423", epoch=1624510582, n=3000)
+        forward = read_lemi423([a, b])
+        backward = read_lemi423([b, a])
+        assert forward.dataset.equals(backward.dataset)
+        assert forward.dataset.sizes["time"] == 6000
