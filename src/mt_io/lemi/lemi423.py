@@ -232,6 +232,22 @@ class Read_Lemi_Data:
         self.binary_file = str(binary_file)
         self.coefficients = coefficients
 
+    def _warn_no_rate(self, seconds: np.ndarray) -> None:
+        """
+        Say why a file has no sample rate.
+
+        The rate is the tick counter's maximum plus one, so a tick that never
+        leaves 0 gives none. The LEMI-423 has no 1 Hz mode, so this is a
+        faulty file; the records per second are reported to show what it holds.
+        """
+        _, per_second = np.unique(seconds, return_counts=True)
+        logger.warning(
+            f"{Path(self.binary_file).name}: tick counter is 0 in all "
+            f"{seconds.size} records ({np.median(per_second):g} records per "
+            "second), so no sample rate can be detected; not a LEMI-423 rate, "
+            "check the instrument"
+        )
+
     def read_dataframe(self) -> pd.DataFrame:
         with open(self.binary_file, "rb") as f:
             f.read(1024)  # skip header
@@ -247,6 +263,8 @@ class Read_Lemi_Data:
         # Tick resets to 0 when timestamp increments, so max(tick) + 1 = sample rate
         tick_max = df["tick"].max()
         self.sample_rate = float(tick_max + 1) if tick_max > 0 else None
+        if self.sample_rate is None:
+            self._warn_no_rate(arr["time"])
 
         df["time"] = pd.to_datetime(df["time"], unit="s", utc=True) + pd.to_timedelta(
             df["tick"], unit="ms"
@@ -281,6 +299,8 @@ class Read_Lemi_Data:
             return pd.to_datetime(int(ms), unit="ms", utc=True)
 
         tick_max = int(ticks.max())
+        if tick_max == 0:
+            self._warn_no_rate(np.asarray(arr["time"]))
         return {
             "n_samples": n_samples,
             "start": stamp(stamps.min()),
@@ -686,6 +706,10 @@ class LEMI423Reader:
         elif len(full.index) > 1:
             dt = full.index.to_series().diff().dropna().dt.total_seconds().median()
             self.sample_rate = (1.0 / dt) if dt and dt > 0 else None
+            self.logger.warning(
+                f"{self.files[0].name}: sample rate {self.sample_rate} Hz taken "
+                "from the time stamps, the tick counter gave none"
+            )
         else:
             self.sample_rate = None
 

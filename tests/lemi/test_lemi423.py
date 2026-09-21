@@ -110,3 +110,40 @@ class TestCollection:
             lc.logger.remove(handler)
         assert len(df) == 0
         assert any("1 at 1000.0 Hz" in m for m in messages), messages
+
+
+class TestSampleRate:
+    def _warnings(self, action):
+        from loguru import logger
+
+        messages = []
+        handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            result = action()
+        finally:
+            logger.remove(handler)
+        return result, messages
+
+    def test_rate_from_tick(self, tmp_path):
+        fn = write_b423(tmp_path / "1624510579.B423")
+        reader = Read_Lemi_Data(fn, {})
+        reader.read_dataframe()
+        assert reader.sample_rate == 1000.0
+        assert reader.read_summary()["sample_rate"] == 1000.0
+
+    def test_tick_always_zero_is_reported(self, tmp_path):
+        """One record a second, tick 0: no rate, and a warning naming the file"""
+        fn = write_b423(tmp_path / "1624510579.B423", n=30, rate=1)
+        reader = Read_Lemi_Data(fn, {})
+        summary, messages = self._warnings(reader.read_summary)
+        assert summary["sample_rate"] is None
+        assert any("1624510579.B423" in m and "1 records per second" in m for m in messages)
+        _, messages = self._warnings(reader.read_dataframe)
+        assert reader.sample_rate is None
+        assert any("1624510579.B423" in m for m in messages)
+
+    def test_reader_says_where_the_rate_came_from(self, tmp_path):
+        fn = write_b423(tmp_path / "1624510579.B423", n=30, rate=1)
+        run, messages = self._warnings(lambda: read_lemi423(fn))
+        assert run.run_metadata.sample_rate == 1.0
+        assert any("taken from the time stamps" in m for m in messages)
