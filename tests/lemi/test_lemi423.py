@@ -234,3 +234,36 @@ class TestVectorisedRead:
         backward = read_lemi423([b, a])
         assert forward.dataset.equals(backward.dataset)
         assert forward.dataset.sizes["time"] == 6000
+
+
+class TestGPSStatus:
+    def _file(self, tmp_path):
+        fn = write_b423(tmp_path / "1624510579.B423", n=2000)
+        arr = np.memmap(fn, dtype=RECORD, mode="r+", offset=1024, shape=(2000,))
+        arr["sync"] = np.arange(2000) % 7 - 3
+        arr["stage"] = np.arange(2000) % 4
+        arr.flush()
+        del arr
+        return fn
+
+    def test_frame_columns(self, tmp_path):
+        fn = self._file(tmp_path)
+        df = Read_Lemi_Data(fn, {}).read_dataframe(gps=True)
+        assert list(df.columns) == ["Bx", "By", "Bz", "Ex", "Ey", "sync", "stage"]
+        np.testing.assert_array_equal(df["sync"], np.arange(2000) % 7 - 3)
+        assert df["sync"].dtype == np.int8 and df["stage"].dtype == np.uint8
+        assert list(Read_Lemi_Data(fn, {}).read_dataframe().columns) == [
+            "Bx", "By", "Bz", "Ex", "Ey"
+        ]
+
+    def test_auxiliary_channels(self, tmp_path):
+        fn = self._file(tmp_path)
+        run = read_lemi423(fn, gps_status=True)
+        assert sorted(run.channels) == sorted(
+            ["hx", "hy", "hz", "ex", "ey", "gps_sync", "gps_stage"]
+        )
+        np.testing.assert_array_equal(run.dataset["gps_stage"].values, np.arange(2000) % 4)
+        assert run.gps_sync.channel_metadata.type == "auxiliary"
+        plain = read_lemi423(fn)
+        assert sorted(plain.channels) == ["ex", "ey", "hx", "hy", "hz"]
+        assert plain.dataset.equals(run.dataset[["hx", "hy", "hz", "ex", "ey"]])
