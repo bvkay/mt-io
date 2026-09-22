@@ -847,7 +847,10 @@ class UoAReader:
 
     :param data_path: Path to data directory or file
     :type data_path: str or Path
-    :param sensor_type: 'bartington' or 'lemi120' (default: 'bartington')
+    :param sensor_type: 'bartington' or 'lemi120'. Not given, the Bartington
+     fluxgate chain is used and a warning says so; a rate of 100 Hz or more
+     read with that chain is warned about too, as UoA recorded coils at
+     500 and 1000 Hz and fluxgates at 10 Hz
     :type sensor_type: str, optional
     :param kwargs: Additional parameters (see below)
     :type kwargs: dict
@@ -903,7 +906,7 @@ class UoAReader:
         - For accurate E-field, provide actual dipole lengths in meters
     """
 
-    def __init__(self, data_path, sensor_type: str = "bartington", **kwargs):
+    def __init__(self, data_path, sensor_type: Optional[str] = None, **kwargs):
         self.logger = logger
         # a directory, a single file, or the file list a collection built for
         # one run
@@ -911,7 +914,9 @@ class UoAReader:
             self.data_path = [Path(f) for f in data_path]
         else:
             self.data_path = Path(data_path)
-        self.sensor_type = sensor_type.lower()
+        # None falls back to the fluxgate chain, with a warning in read()
+        self.sensor_type_given = sensor_type is not None
+        self.sensor_type = (sensor_type or "bartington").lower()
 
         # Required parameters
         # may be None; read() then works it out from the file stamps
@@ -1087,6 +1092,9 @@ class UoAReader:
                 + ". Use UoACollection to split them into runs."
             )
 
+        if any(channel in channel_data for channel in ("BX", "BY", "BZ")):
+            self._check_sensor_type()
+
         native_rate = None
         if self.decimate_to:
             ratio = self.sample_rate / float(self.decimate_to)
@@ -1194,6 +1202,27 @@ class UoAReader:
             run_metadata=run_meta,
         )
 
+    def _check_sensor_type(self) -> None:
+        """
+        Warn when the magnetic chain may not be the sensors recorded.
+
+        A LEMI-120 record read with the fluxgate chain comes out 2800 times
+        too large (400,000 against 142.857 uV/nT) and without the coil
+        response, with nothing else to show it.
+        """
+        if not self.sensor_type_given:
+            self.logger.warning(
+                "sensor_type not given: magnetics calibrated as Bartington "
+                "fluxgates, 142.857 uV/nT. Pass sensor_type='lemi120' and the "
+                "calibration_fn_b* files for induction coils."
+            )
+        if self.sensor_type == "bartington" and self.sample_rate >= 100:
+            self.logger.warning(
+                f"{self.sample_rate:g} Hz read with the Bartington fluxgate chain; "
+                "UoA recorded coils at 500 and 1000 Hz. A LEMI-120 record read this "
+                "way is 2800 times too large and has no coil response."
+            )
+
     def _create_magnetic_filters(self, component: str) -> Optional[ChannelResponse]:
         """
         Build the response chain for a magnetic channel.
@@ -1203,8 +1232,9 @@ class UoAReader:
 
         :param component: component name ('hx', 'hy' or 'hz')
         :type component: str
-        :return: channel response, or None if a .rsp file is missing
+        :return: channel response, or None if no .rsp file is given
         :rtype: :class:`mt_metadata.timeseries.filters.ChannelResponse` or None
+        :raises ValueError: if a .rsp file given cannot be read
         """
         filters = []
 
@@ -1243,9 +1273,11 @@ class UoAReader:
                     # the table already holds the sensitivity, it just stops at
                     # milliVolt while the logger records microVolt
                     filters.append(create_mv_to_uv_filter())
-            except Exception as e:
-                self.logger.error(f"Error reading calibration file {cal_fn}: {e}")
-                return None
+            except Exception as error:
+                # a channel without its response is worse than no channel
+                raise ValueError(
+                    f"Cannot read the {component} coil response {cal_fn}: {error}"
+                ) from error
         else:
             raise ValueError(f"Unknown sensor type: {self.sensor_type}")
 

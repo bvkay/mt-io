@@ -96,3 +96,57 @@ class TestLEMI120Chain:
         f = create_lemi120_dc_gain_filter("hx")
         assert f.gain == 400000.0
         assert "400 mV/nT" in f.comments.value
+
+    def _warnings(self, action):
+        from loguru import logger
+
+        messages = []
+        handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            result = action()
+        finally:
+            logger.remove(handler)
+        return result, messages
+
+    def test_default_chain_is_named(self, tmp_path):
+        """No sensor_type at 1000 Hz: fluxgate chain, and two warnings say so"""
+        write_edl(tmp_path, ["240101000000"], n_samples=100)
+        files = sorted(tmp_path.glob("TEST01_*"))
+        run, messages = self._warnings(lambda: read(files, sample_rate=1000.0))
+        names = [f.name for f in run.hx.channel_metadata.filters]
+        assert names == ["uoa_bartington_hx"]
+        assert any("sensor_type not given" in m for m in messages)
+        assert any("1000 Hz read with the Bartington fluxgate chain" in m for m in messages)
+
+        _, messages = self._warnings(
+            lambda: read(files, sample_rate=10.0, sensor_type="bartington")
+        )
+        assert not any("sensor_type" in m or "fluxgate chain" in m for m in messages)
+
+    def test_lemi120_chain(self, tmp_path):
+        write_edl(tmp_path, ["240101000000"], n_samples=100)
+        rsp = write_rsp(tmp_path / "l120n.rsp")
+        run = read(
+            sorted(tmp_path.glob("TEST01_*")),
+            sample_rate=1000.0,
+            sensor_type="lemi120",
+            **{f"calibration_fn_{c}": rsp for c in ("bx", "by", "bz")},
+        )
+        response = run.hx.channel_response
+        assert response.names == ["lemi_120_hx_response", "lemi120_dc_gain_hx"]
+        assert response.units_in == "nanoTesla"
+        assert response.units_out == "microVolt"
+
+    def test_unreadable_coil_file_raises(self, tmp_path):
+        write_edl(tmp_path, ["240101000000"], n_samples=100)
+        bad = tmp_path / "broken.rsp"
+        bad.write_text("B\nfreq amp phas\nnot a number\n")
+        with pytest.raises(ValueError, match="hx coil response"):
+            read(
+                sorted(tmp_path.glob("TEST01_*")),
+                sample_rate=1000.0,
+                sensor_type="lemi120",
+                calibration_fn_bx=bad,
+                calibration_fn_by=bad,
+                calibration_fn_bz=bad,
+            )
