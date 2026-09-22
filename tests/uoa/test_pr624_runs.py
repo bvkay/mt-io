@@ -77,3 +77,22 @@ class TestContiguity:
         write_edl(tmp_path, ["240101000000", "240101000100"])
         with pytest.raises(ValueError, match="UoACollection"):
             read(tmp_path)
+
+
+def write_rsp(path: Path) -> Path:
+    """A normalized coil response table, amplitude about 1 in the pass band"""
+    freqs = np.logspace(-3, 3, 25)
+    amps = freqs / np.sqrt(freqs**2 + 0.01)
+    phases = np.degrees(np.arctan2(0.1, freqs))
+    rows = "\n".join(f"{f:.6e} {a:.6e} {p:.6e}" for f, a, p in zip(freqs, amps, phases))
+    path.write_text("B\nfreq amp phas\n" + rows + "\n")
+    return path
+
+
+class TestLEMI120Chain:
+    def test_sensitivity_note(self):
+        from mt_io.uoa.pr624 import create_lemi120_dc_gain_filter
+
+        f = create_lemi120_dc_gain_filter("hx")
+        assert f.gain == 400000.0
+        assert "400 mV/nT" in f.comments.value

@@ -262,8 +262,10 @@ def create_lemi120_dc_gain_filter(component: str) -> CoefficientFilter:
     dc_filter.name = f"lemi120_dc_gain_{component}"
     dc_filter.units_in = "nanoTesla"
     dc_filter.units_out = "microVolt"
-    dc_filter.gain = LEMI120_UV_PER_NT  # 200,000 uV/nT (forward)
-    dc_filter.comments = "LEMI-120 flat-band sensitivity: 200 mV/nT"
+    dc_filter.gain = LEMI120_UV_PER_NT  # 400,000 uV/nT (forward)
+    dc_filter.comments = (
+        f"LEMI-120 flat-band sensitivity: {LEMI120_SENSITIVITY_MV_PER_NT:g} mV/nT"
+    )
     return dc_filter
 
 
