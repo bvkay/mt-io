@@ -89,7 +89,10 @@ class UoACollection(Collection):
         """
         Read ``config/recorder.ini`` if the recorder left one behind.
 
-        :return: sample rate, station id and gain flag, empty if absent
+        :return: sample rate, station id, the high gain flags, empty if
+         absent. ``channel_high_gain`` and ``channel_long_id`` hold each
+         channel's ``channel_n_high_gain`` and ``channel_n_long_id`` text as
+         written, keyed by n; ``high_gain`` is True if any flag is set.
         :rtype: dict
         """
         if self.file_path is None:
@@ -125,6 +128,14 @@ class UoACollection(Collection):
             info["sample_rate"] = float(rates.pop())
         elif rates:
             self.logger.warning(f"Mixed channel sample rates in recorder.ini: {rates}")
+
+        # as written, keyed by channel number, for the caller to interpret
+        for key in ("high_gain", "long_id"):
+            info[f"channel_{key}"] = {
+                n: section.get(f"channel_{n}_{key}").strip()
+                for n in range(6)
+                if section.get(f"channel_{n}_{key}") is not None
+            }
 
         info["high_gain"] = any(
             section.getint(f"channel_{n}_high_gain", fallback=0) for n in range(6)

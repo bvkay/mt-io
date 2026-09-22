@@ -27,6 +27,10 @@ Filter gains, physical to recorded:
     hz       nT    -> uV    142.857 * 0.4   (15k/10k divider to the logger)
     ex, ey   mV/km -> uV    L * 10          (dipole length, terminal box)
 
+Any other gain between a sensor and the logger is declared per channel
+with ``channel_gain``; its default is 10 for ex and ey (the terminal box)
+and 1 for the magnetic channels.
+
 Broadband systems use LEMI-120 coils with a normalized .rsp response, so
 the flat-band 400 mV/nT sensitivity is carried as a separate filter.
 
@@ -100,6 +104,15 @@ NOMINAL_AZIMUTH = {"ex": 0.0, "ey": 90.0}
 
 # Electric field terminal box gain (hardware-fixed)
 E_TERMINAL_BOX_GAIN = 10.0  # x10 pre-amplifier
+
+# Gain between each sensor and the logger when the caller declares none
+DEFAULT_CHANNEL_GAIN = {
+    "hx": 1.0,
+    "hy": 1.0,
+    "hz": 1.0,
+    "ex": E_TERMINAL_BOX_GAIN,
+    "ey": E_TERMINAL_BOX_GAIN,
+}
 
 # Bartington Mag-03 fluxgate, +/-10 V over +/-70,000 nT
 BARTINGTON_NT_PER_V = 70000.0 / 10.0  # 7000 nT/V
@@ -245,6 +258,31 @@ def create_efield_gain_filter(gain: float = E_TERMINAL_BOX_GAIN) -> CoefficientF
         f"E-field terminal box, x{gain:g} pre-amplifier ahead of the logger."
     )
     return efield_filter
+
+
+def create_channel_gain_filter(component: str, gain: float) -> CoefficientFilter:
+    """
+    Create a gain stage declared for one channel.
+
+    A gain ahead of the logger that the reader does not otherwise know
+    about, supplied by the caller through ``channel_gain``. It is the last
+    stage of the chain, so calibration divides the channel by it.
+
+    :param component: component name ('hx', 'hy', 'hz', 'ex' or 'ey')
+    :type component: str
+    :param gain: forward gain, sensor chain to logger
+    :type gain: float
+    :return: coefficient filter, microVolt to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
+    """
+    gain_filter = CoefficientFilter()
+    # the gain is in the name: an MTH5 file keeps one filter per name
+    gain_filter.name = f"uoa_gain_{component}_x{gain:g}"
+    gain_filter.units_in = "microVolt"
+    gain_filter.units_out = "microVolt"
+    gain_filter.gain = gain
+    gain_filter.comments = f"x{gain:g} ahead of the logger, declared as channel_gain"
+    return gain_filter
 
 
 def create_lemi120_dc_gain_filter(component: str) -> CoefficientFilter:
@@ -866,6 +904,11 @@ class UoAReader:
         * **ey_azimuth** (float) - as-laid Ey azimuth in degrees (default: 90)
         * **efield_gain** (float) - E terminal box gain, 1.0 if none was used
           (default: 10.0)
+        * **channel_gain** (dict) - gain between the sensor and the logger
+          per channel, e.g. ``{"ex": 100.0}``; keys hx..ey or BX..EY. Default
+          1.0 for hx, hy, hz and the terminal box gain for ex, ey. A value
+          for ex or ey replaces the terminal box stage; on a magnetic
+          channel it is added as the last stage.
         * **declination** (float) - magnetic declination in degrees (default: 0)
         * **geographic_name** (str) - site name from the deployment notes
         * **acquired_by** (str) - operator from the deployment notes
@@ -941,6 +984,7 @@ class UoAReader:
 
         # from the deployment notes, nothing in the data files carries these
         self.efield_gain = kwargs.get("efield_gain", E_TERMINAL_BOX_GAIN)
+        self.channel_gain = self._resolve_channel_gain(kwargs.get("channel_gain"))
         self.declination = kwargs.get("declination", 0.0)
         self.geographic_name = kwargs.get("geographic_name", None)
         self.acquired_by = kwargs.get("acquired_by", None)
@@ -961,6 +1005,29 @@ class UoAReader:
         self.data = None
         self.n_samples = 0
         self.start_time: Optional[datetime] = None
+
+    def _resolve_channel_gain(self, declared: Optional[dict]) -> dict:
+        """
+        Merge the declared gains over the defaults.
+
+        :param declared: channel -> gain, keys hx..ey or BX..EY
+        :type declared: dict or None
+        :return: gain per channel hx, hy, hz, ex, ey
+        :rtype: dict
+        :raises ValueError: for an unknown channel or a gain of 0
+        """
+        names = {"bx": "hx", "by": "hy", "bz": "hz"}
+        gains = dict(DEFAULT_CHANNEL_GAIN, ex=self.efield_gain, ey=self.efield_gain)
+        for key, value in (declared or {}).items():
+            component = names.get(str(key).lower(), str(key).lower())
+            if component not in gains:
+                raise ValueError(
+                    f"channel_gain names {key!r}, not one of {', '.join(gains)}"
+                )
+            if not value:
+                raise ValueError(f"channel_gain for {key!r} is {value}")
+            gains[component] = float(value)
+        return gains
 
     def _get_station_id(self) -> str:
         """
@@ -1027,6 +1094,10 @@ class UoAReader:
         self.logger.info(f"Reading EDL data from {source}")
         self.logger.info(
             f"Sensor type: {self.sensor_type}, Sample rate: {self.sample_rate} Hz"
+        )
+        self.logger.info(
+            "Gain after the sensors: "
+            + ", ".join(f"{c} x{g:g}" for c, g in self.channel_gain.items())
         )
 
         # Define MT channels
@@ -1281,6 +1352,11 @@ class UoAReader:
         else:
             raise ValueError(f"Unknown sensor type: {self.sensor_type}")
 
+        if self.channel_gain[component] != 1.0:
+            filters.append(
+                create_channel_gain_filter(component, self.channel_gain[component])
+            )
+
         if filters:
             return ChannelResponse(filters_list=filters)
         return None
@@ -1311,7 +1387,12 @@ class UoAReader:
 
         azimuth = self.ex_azimuth if component == "ex" else self.ey_azimuth
         filters.append(create_dipole_length_filter(component, dipole_length, azimuth))
-        filters.append(create_efield_gain_filter(self.efield_gain))
+        gain = self.channel_gain[component]
+        if gain == self.efield_gain:
+            filters.append(create_efield_gain_filter(self.efield_gain))
+        else:
+            # declared for this channel, in place of the terminal box
+            filters.append(create_channel_gain_filter(component, gain))
 
         return ChannelResponse(filters_list=filters)
 

@@ -150,3 +150,62 @@ class TestLEMI120Chain:
                 calibration_fn_by=bad,
                 calibration_fn_bz=bad,
             )
+
+
+class TestChannelGain:
+    def _run(self, tmp_path, **kwargs):
+        write_edl(tmp_path, ["240101000000"])
+        return read(sorted(tmp_path.glob("TEST01_*")), sensor_type="bartington", **kwargs)
+
+    def test_default_chain_unchanged(self, tmp_path):
+        run = self._run(tmp_path)
+        assert run.ex.channel_response.names == [
+            "uoa_dipole_ex_50.0m",
+            "uoa_efield_terminal_box_gain",
+        ]
+        assert run.ex.channel_response.filters_list[-1].gain == 10.0
+        assert run.hx.channel_response.names == ["uoa_bartington_hx"]
+
+    def test_declared_gain_reads_smaller(self, tmp_path):
+        """ex declared at x100 instead of the x10 box calibrates 10 times smaller"""
+        default = self._run(tmp_path / "a")
+        run = self._run(tmp_path / "b", channel_gain={"EX": 100.0, "hx": 10.0})
+        assert run.ex.channel_response.names == ["uoa_dipole_ex_50.0m", "uoa_gain_ex_x100"]
+        assert run.ey.channel_response.names == default.ey.channel_response.names
+        assert run.hx.channel_response.names == ["uoa_bartington_hx", "uoa_gain_hx_x10"]
+        f = np.array([0.1, 1.0])
+        for comp in ("ex", "hx"):
+            ratio = np.abs(
+                getattr(run, comp).channel_response.complex_response(f)
+                / getattr(default, comp).channel_response.complex_response(f)
+            )
+            np.testing.assert_allclose(ratio, 10.0)
+        np.testing.assert_array_equal(run.ex.ts, default.ex.ts)
+
+    def test_efield_gain_still_sets_the_box(self, tmp_path):
+        run = self._run(tmp_path, efield_gain=1.0)
+        assert run.ex.channel_response.names[-1] == "uoa_efield_terminal_box_gain"
+        assert run.ex.channel_response.filters_list[-1].gain == 1.0
+
+    def test_unknown_channel(self, tmp_path):
+        with pytest.raises(ValueError, match="channel_gain names 'tp'"):
+            self._run(tmp_path, channel_gain={"tp": 10.0})
+
+
+def test_recorder_ini_flags_kept(tmp_path):
+    from mt_io.uoa import UoACollection
+
+    (tmp_path / "config").mkdir()
+    lines = ["[recorder]", "station_long_identifier=TEST01_"]
+    for n, ident in enumerate(["BX", "BY", "BZ", "EX", "EY", "TP"]):
+        lines += [
+            f"channel_{n}_samplerate=10",
+            f"channel_{n}_long_id={ident}",
+            f"channel_{n}_high_gain={int(ident in ('EX', 'EY'))}",
+        ]
+    (tmp_path / "config" / "recorder.ini").write_text("\n".join(lines) + "\n")
+    info = UoACollection(tmp_path).read_recorder_ini()
+    assert info["channel_high_gain"] == {0: "0", 1: "0", 2: "0", 3: "1", 4: "1", 5: "0"}
+    assert info["channel_long_id"][3] == "EX"
+    assert info["high_gain"] is True
+    assert info["sample_rate"] == 10.0
