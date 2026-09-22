@@ -571,6 +571,54 @@ def infer_sample_rate(
     return float(rate)
 
 
+def find_discontinuities(channel_files: dict, sample_rate: float) -> List[str]:
+    """
+    Say where a set of channel files does not join into one record.
+
+    Each channel's files are joined end to end and dated from the first
+    stamp, so every file has to start where the previous one ends, and every
+    channel has to start with the others. A tolerance of two samples absorbs
+    rounding in the stamps, as in :class:`UoACollection`. Files without a
+    stamp cannot be checked and are left out.
+
+    :param channel_files: channel -> list of (path, samples read) per file
+    :type channel_files: dict
+    :param sample_rate: sample rate of the files in Hz
+    :type sample_rate: float
+    :return: one message per break, empty when the files are contiguous
+    :rtype: list of str
+    """
+    tolerance = 2.0 / sample_rate
+    problems, starts = [], {}
+    for channel, files in channel_files.items():
+        stamped = sorted(
+            (
+                (parse_edl_timestamp(fn), Path(fn), n)
+                for fn, n in files
+                if parse_edl_timestamp(fn)
+            ),
+            key=lambda item: item[0],
+        )
+        if not stamped:
+            continue
+        starts[channel] = stamped[0]
+        for (t0, f0, n0), (t1, f1, _) in zip(stamped, stamped[1:]):
+            step = (t1 - t0).total_seconds() - n0 / sample_rate
+            if abs(step) > tolerance:
+                what = f"{step:.1f} s missing" if step > 0 else f"{-step:.1f} s overlap"
+                problems.append(f"{channel}: {what} between {f0.name} and {f1.name}")
+
+    if starts:
+        first = min(t for t, _, _ in starts.values())
+        for channel, (t, fn, _) in starts.items():
+            if t != first:
+                problems.append(
+                    f"{channel}: starts at {fn.name}, "
+                    f"{(t - first).total_seconds():.1f} s after the other channels"
+                )
+    return problems
+
+
 def decimate_series(data: np.ndarray, factor: int, max_stage: int = 8) -> np.ndarray:
     """
     Decimate one channel with anti-alias filtering.
@@ -648,6 +696,8 @@ class UoADataReader:
         self.files: List[Path] = []
         # (start, sample_rate) per file, filled in for miniSEED
         self.segments: List[tuple] = []
+        # (path, samples) per ASCII file read
+        self.lengths: List[tuple] = []
         self.logger = logger
 
     def find_files(self) -> List[Path]:
@@ -741,6 +791,7 @@ class UoADataReader:
 
         all_data = []
         self.segments = []
+        self.lengths = []
         for file_path in files:
             try:
                 if is_miniseed(file_path):
@@ -750,6 +801,7 @@ class UoADataReader:
                     data = np.loadtxt(file_path, dtype=float, comments=None)
                     if data.ndim > 1:
                         data = data.flatten()
+                    self.lengths.append((file_path, len(data)))
 
                 all_data.append(data)
                 self.logger.debug(f"Read {len(data)} samples from {file_path.name}")
@@ -975,6 +1027,7 @@ class UoAReader:
         channel_data = {}
         channel_files = {}
         channel_segments = {}
+        channel_lengths = {}
 
         # Read each channel
         for channel in channels:
@@ -988,6 +1041,7 @@ class UoAReader:
             channel_data[channel] = data
             channel_files[channel] = reader.files
             channel_segments[channel] = reader.segments
+            channel_lengths[channel] = reader.lengths
 
         # Check we have data
         if not channel_data:
@@ -1020,6 +1074,17 @@ class UoAReader:
                     "sample_rate could not be determined; pass sample_rate explicitly"
                 )
 
+        # Files are joined end to end and dated from the first stamp, so a
+        # file missing, repeated or shorter than the gap to the next stamp
+        # would date every later sample of its channel wrongly
+        problems = find_discontinuities(channel_lengths, self.sample_rate)
+        if problems:
+            raise ValueError(
+                "EDL files do not make one contiguous run: "
+                + "; ".join(problems)
+                + ". Use UoACollection to split them into runs."
+            )
+
         native_rate = None
         if self.decimate_to:
             ratio = self.sample_rate / float(self.decimate_to)
@@ -1046,10 +1111,11 @@ class UoAReader:
         # the stamp in the file name.
         stamps = [start for segs in channel_segments.values() for start, _ in segs]
         if not stamps:
+            # the files read, not a file that failed to parse
             stamps = [
                 stamp
-                for files in channel_files.values()
-                for stamp in (parse_edl_timestamp(f) for f in files)
+                for lengths in channel_lengths.values()
+                for stamp in (parse_edl_timestamp(f) for f, _ in lengths)
                 if stamp is not None
             ]
         self.start_time = min(stamps) if stamps else None
@@ -1059,34 +1125,6 @@ class UoAReader:
             )
         else:
             self.logger.info(f"Run starts {self.start_time.isoformat()}")
-
-        # Files are concatenated end to end, so warn if they do not join up.
-        # File length is a recorder setting, so compare total samples against
-        # the wall-clock span rather than assuming a fixed file duration.
-        # count_samples reads the file, so it is in the rate the file was
-        # written at, which is not self.sample_rate once decimation has run
-        file_rate = native_rate if native_rate else self.sample_rate
-        for channel, files in channel_files.items():
-            if channel not in channel_data or len(files) < 2:
-                continue
-            stamped = sorted(
-                ((parse_edl_timestamp(f), f) for f in files if parse_edl_timestamp(f)),
-                key=lambda pair: pair[0],
-            )
-            if len(stamped) < 2 or is_miniseed(stamped[-1][1]):
-                continue
-            # the run ends where the last file ends, not at its start stamp
-            span = (stamped[-1][0] - stamped[0][0]).total_seconds() + (
-                count_samples(stamped[-1][1]) / file_rate
-            )
-            recorded = len(channel_data[channel]) / self.sample_rate
-            missing = span - recorded
-            if missing > 1.0 / self.sample_rate:
-                self.logger.warning(
-                    f"{channel}: {missing:.1f} s missing between files; samples "
-                    "after a gap will be dated early. Use UoACollection to split "
-                    "the deployment into runs."
-                )
 
         station_meta = self._build_station_metadata()
         run_meta = self._build_run_metadata()
