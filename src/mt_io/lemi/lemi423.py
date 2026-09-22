@@ -25,7 +25,14 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from mt_metadata.common import MTime
-from mt_metadata.timeseries import AppliedFilter, Electric, Magnetic, Run, Station
+from mt_metadata.timeseries import (
+    AppliedFilter,
+    Auxiliary,
+    Electric,
+    Magnetic,
+    Run,
+    Station,
+)
 from mt_metadata.timeseries.filters import (
     ChannelResponse,
     CoefficientFilter,
@@ -204,7 +211,9 @@ class Read_Lemi_Data:
     ---------------
     - **Timestamp**: Constructed from time + tick (millisecond resolution)
     - **Magnetic/Electric**: RAW counts returned as-is (int32)
-    - **Unused fields**: sync, stage, CRC are read but discarded
+    - **GPS status**: sync and stage, the only in-band record of GPS lock,
+      are returned with ``read_dataframe(gps=True)``
+    - **Unused fields**: CRC is read but discarded
 
     Returns
     -------
@@ -268,12 +277,20 @@ class Read_Lemi_Data:
             values = values.astype(f"datetime64[{probe.unit}]")
         return pd.DatetimeIndex(values, name="time").tz_localize(probe.tz)
 
-    def read_dataframe(self) -> pd.DataFrame:
+    def read_dataframe(self, gps: bool = False) -> pd.DataFrame:
+        """
+        Read the records as a time indexed frame of raw counts.
+
+        :param gps: also return the sync (int8, deviation from PPS) and
+         stage (uint8, PLL accuracy) columns, defaults to False
+        :type gps: bool
+        """
+        columns = ["Bx", "By", "Bz", "Ex", "Ey"] + (["sync", "stage"] if gps else [])
         with open(self.binary_file, "rb") as f:
             f.read(1024)  # skip header
             arr = np.fromfile(f, dtype=self.binary_format)
         if arr.size == 0:
-            return pd.DataFrame(columns=["Bx", "By", "Bz", "Ex", "Ey"]).set_index(
+            return pd.DataFrame(columns=columns).set_index(
                 pd.DatetimeIndex([], tz="UTC", name="time")
             )
 
@@ -286,7 +303,7 @@ class Read_Lemi_Data:
 
         # Return RAW counts (no calibration applied), in time order
         df = pd.DataFrame(
-            {name: arr[name] for name in ("Bx", "By", "Bz", "Ex", "Ey")},
+            {name: arr[name] for name in columns},
             index=self._time_index(arr["time"], arr["tick"]),
         )
         if not df.index.is_monotonic_increasing:
@@ -446,6 +463,8 @@ class LEMI423Reader:
         * **dipole_length_ex** (float) - Ex dipole length in meters (default: 0)
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 0)
         * **station_id** (str) - Station identifier (optional)
+        * **gps_status** (bool) - add the per-record GPS columns as
+          auxiliary channels gps_sync and gps_stage (default: False)
 
     **Filter Chain** (physical to recorded):
         - Magnetic (optional): LEMI-120 coil response (nT -> nT, normalized)
@@ -461,6 +480,7 @@ class LEMI423Reader:
         self.dipole_length_ey = kwargs.get("dipole_length_ey", 0)
         self.station_id = kwargs.get("station_id", None)
         self.calibration_fn = kwargs.get("calibration_fn", None)
+        self.gps_status = kwargs.get("gps_status", False)
         self.data = None
         self.header = None
 
@@ -601,6 +621,9 @@ class LEMI423Reader:
                 r.add_channel(Magnetic(component=ch_h))
             for ch_e in ["ex", "ey"]:
                 r.add_channel(Electric(component=ch_e))
+            if self.gps_status:
+                for ch_a in ["gps_sync", "gps_stage"]:
+                    r.add_channel(Auxiliary(component=ch_a))
 
         return r
 
@@ -682,7 +705,7 @@ class LEMI423Reader:
         """Read a single B423 file"""
         hdr = Read_Lemi_Header(path).read()
         data_reader = Read_Lemi_Data(path, hdr["coefficients"])
-        df = data_reader.read_dataframe()
+        df = data_reader.read_dataframe(gps=self.gps_status)
         # Add sample_rate to header if detected from tick counter
         if hasattr(data_reader, "sample_rate") and data_reader.sample_rate:
             hdr["sample_rate"] = data_reader.sample_rate
@@ -852,6 +875,32 @@ class LEMI423Reader:
             )
 
             ch_objs.append(ch)
+
+        # the GPS status as recorded, no response
+        gps_columns = {"sync": ("gps_sync", 6), "stage": ("gps_stage", 7)}
+        for src, (code, ch_num) in gps_columns.items():
+            if not self.gps_status or src not in full.columns:
+                continue
+            aux = Auxiliary(component=code)
+            aux.units = "counts"
+            aux.channel_number = ch_num
+            aux.sample_rate = self.sample_rate
+            aux.time_period.start = self.start.isoformat()
+            aux.time_period.end = self.end.isoformat()
+            aux.comments = (
+                "LEMI-423 record field sync, deviation from PPS"
+                if src == "sync"
+                else "LEMI-423 record field stage, PLL accuracy"
+            )
+            ch_objs.append(
+                ChannelTS(
+                    channel_type="auxiliary",
+                    data=full[src].to_numpy(),
+                    channel_metadata=aux,
+                    run_metadata=run_meta,
+                    station_metadata=station_meta,
+                )
+            )
 
         return RunTS(
             array_list=ch_objs,
