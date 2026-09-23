@@ -150,3 +150,14 @@ class TestMessages:
                 r for r in records if r["level"].name == "INFO" and fn.name in r["message"]
             ]
             assert len(lines) == 1, lines
+
+
+def test_temperature_channel(tmp_path):
+    fn = write_file(tmp_path / "A.BIN", "2009-06-16 02:01:04")
+    run = read([fn], temperature=True)
+    assert "temperature" in run.channels
+    np.testing.assert_array_equal(run.dataset["temperature"].values, np.full(50, 20))
+    assert run.temperature.channel_metadata.type == "auxiliary"
+    plain = read([fn])
+    assert sorted(plain.channels) == ["ex", "ey", "hx", "hy", "hz"]
+    assert plain.dataset.equals(run.dataset[["hx", "hy", "hz", "ex", "ey"]])

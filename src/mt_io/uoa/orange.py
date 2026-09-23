@@ -40,7 +40,14 @@ from typing import List, Union
 import numpy as np
 import pandas as pd
 from loguru import logger
-from mt_metadata.timeseries import AppliedFilter, Electric, Magnetic, Run, Station
+from mt_metadata.timeseries import (
+    AppliedFilter,
+    Auxiliary,
+    Electric,
+    Magnetic,
+    Run,
+    Station,
+)
 from mt_metadata.timeseries.filters import ChannelResponse, CoefficientFilter
 from mt_timeseries import ChannelTS, RunTS
 
@@ -290,10 +297,14 @@ class OrangeDataReader:
             self.logger.warning(f"{self.file_path.name}: end stamp {text!r} not read")
             return None
 
-    def read(self) -> pd.DataFrame:
+    def read(self, temperature: bool = False) -> pd.DataFrame:
         """
         Read Orange Box binary file and return raw counts.
 
+        :param temperature: also return channel 5 as column Temperature, the
+         8 bit value the logger's own report prints as the temperature,
+         defaults to False
+        :type temperature: bool
         :return: DataFrame with columns [Bx, Bz, By, Ex, Ey] as raw counts
         :rtype: pd.DataFrame
 
@@ -308,7 +319,10 @@ class OrangeDataReader:
 
         if samples.size == 0:
             self.logger.warning(f"No samples read from {self.file_path}")
-            return pd.DataFrame(columns=["Bx", "Bz", "By", "Ex", "Ey"])
+            return pd.DataFrame(
+                columns=["Bx", "Bz", "By", "Ex", "Ey"]
+                + (["Temperature"] if temperature else [])
+            )
 
         # Extract MT channels (raw counts, no calibration)
         # Channel mapping: 0=Bx, 1=Bz, 2=By, 6=Ey, 7=Ex
@@ -321,6 +335,8 @@ class OrangeDataReader:
                 "Ex": samples[:, 7],  # Channel 7
             }
         )
+        if temperature:
+            df["Temperature"] = samples[:, 5]  # Channel 5, 8 bit
 
         self.logger.info(f"Read {len(df)} samples from {self.file_path.name}")
         return df
@@ -351,6 +367,9 @@ class OrangeReader:
           +/-10 V boxes, 25000 for the earlier +/-2.5 V ones (default: 100000)
         * **magnetic_full_scale_nt** (float) - Bartington sensor full scale,
           70000 or 100000 nT (default: 70000)
+        * **temperature** (bool) - add channel 5, which the logger's report
+          prints as the temperature, as auxiliary channel temperature in
+          raw counts (default: False)
         * **latitude** (float) - Station latitude in decimal degrees
         * **longitude** (float) - Station longitude in decimal degrees
         * **elevation** (float) - Station elevation in meters
@@ -392,6 +411,7 @@ class OrangeReader:
         self.magnetic_full_scale_nt = kwargs.get(
             "magnetic_full_scale_nt", BARTINGTON_FULL_SCALE_NT
         )
+        self.temperature = kwargs.get("temperature", False)
         self.latitude = kwargs.get("latitude", 0.0)
         self.longitude = kwargs.get("longitude", 0.0)
         self.elevation = kwargs.get("elevation", 0.0)
@@ -413,7 +433,7 @@ class OrangeReader:
         readers = []
         for file_path in self.files:
             reader = OrangeDataReader(file_path)
-            df = reader.read()
+            df = reader.read(temperature=self.temperature)
             readers.append((reader, len(df)))
 
             # Store header from first file
@@ -513,6 +533,27 @@ class OrangeReader:
             )
 
             ch_objs.append(ch)
+
+        if self.temperature and "Temperature" in self.data.columns:
+            aux = Auxiliary(component="temperature")
+            aux.units = "counts"
+            aux.channel_number = 6
+            aux.sample_rate = self.sample_rate if self.sample_rate else 0.0
+            if self.start_time is not None:
+                aux.time_period.start = self.start_time.isoformat()
+            aux.comments = (
+                "Orange Box channel 5, 8 bit, as recorded; the logger report "
+                "prints it as the temperature"
+            )
+            ch_objs.append(
+                ChannelTS(
+                    channel_type="auxiliary",
+                    data=self.data["Temperature"].to_numpy(),
+                    channel_metadata=aux,
+                    run_metadata=run_meta,
+                    station_metadata=station_meta,
+                )
+            )
 
         return RunTS(
             array_list=ch_objs,
@@ -641,6 +682,8 @@ def read_orange(data_path: Union[str, Path, List[Union[str, Path]]], **kwargs) -
           +/-10 V boxes, 25000 for the earlier +/-2.5 V ones (default: 100000)
         * **magnetic_full_scale_nt** (float) - Bartington sensor full scale,
           70000 or 100000 nT (default: 70000)
+        * **temperature** (bool) - add channel 5 as auxiliary channel
+          temperature, raw counts (default: False)
         * **latitude** (float) - Station latitude in decimal degrees
         * **longitude** (float) - Station longitude in decimal degrees
         * **elevation** (float) - Station elevation in meters
