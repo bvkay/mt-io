@@ -24,7 +24,9 @@ so the reader stores them signed and the response is then a plain gain:
     ex, ey   mV/km -> count   -2**23 * L / 100000
 
 Boxes built before the symmetric board was rebridged recorded +/-2.5 V, for
-which the electric full scale is 25000 rather than 100000.
+which the electric full scale is 25000 rather than 100000
+(``electric_full_scale_uv``). The magnetic full scale belongs to the
+Bartington sensor, 70000 nT or 100000 nT (``magnetic_full_scale_nt``).
 
 @author: ben kay (ben@auscope.org.au)
 
@@ -73,29 +75,37 @@ STAMP_FORMAT = "%a %b %d %H:%M:%S %Y"
 
 
 def create_orange_magnetic_filter(
-    component: str, invert: bool = False
+    component: str,
+    invert: bool = False,
+    full_scale_nt: float = BARTINGTON_FULL_SCALE_NT,
 ) -> CoefficientFilter:
     """
     Create the Bartington sensor filter for an Orange Box magnetic channel.
 
-    The sensor covers +/-70,000 nT over the full 24 bit swing, so one nT is
-    2**23 / 70000 counts. By is inverted by the hardware.
+    The sensor covers +/-full_scale_nt over the full 24 bit swing, so one nT
+    is 2**23 / full_scale_nt counts. By is inverted by the hardware.
 
     :param component: component name ('hx', 'hy' or 'hz')
     :type component: str
     :param invert: negate the gain, True for hy
     :type invert: bool
+    :param full_scale_nt: sensor full scale, 70000 or 100000 nT
+    :type full_scale_nt: float
     :return: coefficient filter, nanoTesla to count
     :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     mag_filter = CoefficientFilter()
-    mag_filter.name = f"orange_magnetic_{component}"
+    # a full scale other than the default is in the name, as an MTH5 file
+    # keeps one filter per name
+    mag_filter.name = f"orange_magnetic_{component}" + (
+        "" if full_scale_nt == BARTINGTON_FULL_SCALE_NT else f"_{full_scale_nt:.0f}nt"
+    )
     mag_filter.units_in = "nanoTesla"
     mag_filter.units_out = "count"
-    gain = ADC_MAX_COUNTS / BARTINGTON_FULL_SCALE_NT
+    gain = ADC_MAX_COUNTS / full_scale_nt
     mag_filter.gain = -gain if invert else gain
     mag_filter.comments = (
-        f"Orange Box {component.upper()}, +/-{BARTINGTON_FULL_SCALE_NT:.0f} nT "
+        f"Orange Box {component.upper()}, +/-{full_scale_nt:.0f} nT "
         f"over +/-2**23 counts" + (", inverted by the hardware" if invert else "")
     )
     return mag_filter
@@ -125,7 +135,9 @@ def create_orange_electric_filter(
         dipole_length = 1.0
 
     elec_filter = CoefficientFilter()
-    elec_filter.name = f"orange_electric_{component}_{dipole_length}m"
+    elec_filter.name = f"orange_electric_{component}_{dipole_length}m" + (
+        "" if full_scale_uv == ELECTRIC_FULL_SCALE_UV else f"_{full_scale_uv:.0f}uv"
+    )
     elec_filter.units_in = "milliVolt per kilometer"
     elec_filter.units_out = "count"
     elec_filter.gain = -(ADC_MAX_COUNTS * dipole_length) / full_scale_uv
@@ -335,6 +347,10 @@ class OrangeReader:
         * **station_id** (str) - Station identifier (required)
         * **dipole_length_ex** (float) - Ex dipole length in meters (default: 100.0)
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 100.0)
+        * **electric_full_scale_uv** (float) - electric full scale, 100000 for
+          +/-10 V boxes, 25000 for the earlier +/-2.5 V ones (default: 100000)
+        * **magnetic_full_scale_nt** (float) - Bartington sensor full scale,
+          70000 or 100000 nT (default: 70000)
         * **latitude** (float) - Station latitude in decimal degrees
         * **longitude** (float) - Station longitude in decimal degrees
         * **elevation** (float) - Station elevation in meters
@@ -350,6 +366,12 @@ class OrangeReader:
         self.station_id = kwargs.get("station_id", "OrangeBox")
         self.dipole_length_ex = kwargs.get("dipole_length_ex", 100.0)
         self.dipole_length_ey = kwargs.get("dipole_length_ey", 100.0)
+        self.electric_full_scale_uv = kwargs.get(
+            "electric_full_scale_uv", ELECTRIC_FULL_SCALE_UV
+        )
+        self.magnetic_full_scale_nt = kwargs.get(
+            "magnetic_full_scale_nt", BARTINGTON_FULL_SCALE_NT
+        )
         self.latitude = kwargs.get("latitude", 0.0)
         self.longitude = kwargs.get("longitude", 0.0)
         self.elevation = kwargs.get("elevation", 0.0)
@@ -428,14 +450,18 @@ class OrangeReader:
             if ch_type == "magnetic":
                 # Magnetic calibration (invert for hy)
                 invert = code == "hy"
-                mag_filter = create_orange_magnetic_filter(code, invert=invert)
+                mag_filter = create_orange_magnetic_filter(
+                    code, invert=invert, full_scale_nt=self.magnetic_full_scale_nt
+                )
                 filters_list.append(mag_filter)
             else:  # electric
                 # Electric calibration
                 dipole_length = (
                     self.dipole_length_ex if code == "ex" else self.dipole_length_ey
                 )
-                elec_filter = create_orange_electric_filter(code, dipole_length)
+                elec_filter = create_orange_electric_filter(
+                    code, dipole_length, full_scale_uv=self.electric_full_scale_uv
+                )
                 filters_list.append(elec_filter)
 
             # Create ChannelResponse
@@ -582,6 +608,10 @@ def read_orange(data_path: Union[str, Path, List[Union[str, Path]]], **kwargs) -
         * **station_id** (str) - Station identifier (required)
         * **dipole_length_ex** (float) - Ex dipole length in meters (default: 100.0)
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 100.0)
+        * **electric_full_scale_uv** (float) - electric full scale, 100000 for
+          +/-10 V boxes, 25000 for the earlier +/-2.5 V ones (default: 100000)
+        * **magnetic_full_scale_nt** (float) - Bartington sensor full scale,
+          70000 or 100000 nT (default: 70000)
         * **latitude** (float) - Station latitude in decimal degrees
         * **longitude** (float) - Station longitude in decimal degrees
         * **elevation** (float) - Station elevation in meters

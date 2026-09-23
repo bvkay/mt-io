@@ -77,3 +77,27 @@ class TestJoin:
         )
         reader.read()
         assert reader.end_time == pd.Timestamp("2009-06-16 03:01:04", tz="UTC")
+
+
+class TestFullScale:
+    def _responses(self, tmp_path, **kwargs):
+        run = read([write_file(tmp_path / "A.BIN", "2009-06-16 02:01:04")], **kwargs)
+        return {c: getattr(run, c).channel_response for c in ("hx", "hy", "ex")}
+
+    def test_defaults_unchanged(self, tmp_path):
+        r = self._responses(tmp_path)
+        assert r["hx"].names == ["orange_magnetic_hx"]
+        assert r["hx"].filters_list[0].gain == pytest.approx(2**23 / 70000)
+        assert r["ex"].names == ["orange_electric_ex_20.0m"]
+        assert r["ex"].filters_list[0].gain == pytest.approx(-(2**23) * 20 / 100000)
+
+    def test_declared_full_scales(self, tmp_path):
+        r = self._responses(
+            tmp_path, electric_full_scale_uv=25000.0, magnetic_full_scale_nt=100000.0
+        )
+        assert r["hx"].names == ["orange_magnetic_hx_100000nt"]
+        assert r["hx"].filters_list[0].gain == pytest.approx(2**23 / 100000)
+        assert r["hy"].filters_list[0].gain == pytest.approx(-(2**23) / 100000)
+        assert r["ex"].names == ["orange_electric_ex_20.0m_25000uv"]
+        # a quarter of the full scale: E four times smaller once calibrated
+        assert r["ex"].filters_list[0].gain == pytest.approx(-(2**23) * 20 / 25000)
