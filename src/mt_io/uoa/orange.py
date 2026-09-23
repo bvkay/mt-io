@@ -12,7 +12,8 @@ with a 40 byte ASCII header holding the sample count in hex, a 25 character
 timestamp and a 4 character filter point, then fixed 21 byte records: three
 24-bit channels, two 16-bit, one 8-bit, two more 24-bit, and a trailing byte.
 The sample rate is not stored directly, it follows from the filter point as
-10e6 / (512 * filter_point).
+10e6 / (512 * filter_point). A 25 character end stamp follows the last
+record.
 
 Channels map as ch0 to Bx, ch1 to Bz, ch2 to By, ch7 to Ex and ch6 to Ey.
 By, Ex and Ey are inverted by the hardware. Counts are unsigned about 2**23,
@@ -59,6 +60,11 @@ ELECTRIC_FULL_SCALE_UV = 100000.0  # +/-100,000 uV
 # Sample format constants
 BYTES_PER_SAMPLE = 21  # 3+3+3+2+2+1+3+3 channel bytes plus 1 trailing byte
 NCHANNELS = 8
+
+# How far a file may start from the end stamp of the one before and still
+# join it: the stamps are whole seconds of the logger clock
+JOIN_TOLERANCE_S = 2.0
+STAMP_FORMAT = "%a %b %d %H:%M:%S %Y"
 
 
 # ==============================================================================
@@ -150,6 +156,7 @@ class OrangeDataReader:
         self.n_samples = None
         self.sample_rate = None
         self.start_time = None
+        self.end_time = None
         self.filter_point = None
         self.logger = logger
 
@@ -174,9 +181,7 @@ class OrangeDataReader:
         # Line 2: Date/time string
         line2 = f.readline().decode("ascii", errors="ignore").strip()
         try:
-            self.start_time = pd.to_datetime(
-                line2, format="%a %b %d %H:%M:%S %Y", utc=True
-            )
+            self.start_time = pd.to_datetime(line2, format=STAMP_FORMAT, utc=True)
         except Exception as e:
             self.logger.warning(f"Could not parse start time '{line2}': {e}")
             self.start_time = None
@@ -255,6 +260,24 @@ class OrangeDataReader:
         self.logger.info(f"Read {n} samples from {self.file_path.name}")
         return counts
 
+    def parse_end_stamp(self, f):
+        """
+        Read the end stamp that follows the last record.
+
+        :param f: open binary file, positioned after the records
+        :type f: file object
+        :return: end time, or None if the file has no readable end stamp
+        :rtype: :class:`pandas.Timestamp` or None
+        """
+        text = f.read(64).decode("ascii", errors="ignore").strip()
+        if not text:
+            return None
+        try:
+            return pd.to_datetime(text, format=STAMP_FORMAT, utc=True)
+        except (ValueError, TypeError):
+            self.logger.warning(f"{self.file_path.name}: end stamp {text!r} not read")
+            return None
+
     def read(self) -> pd.DataFrame:
         """
         Read Orange Box binary file and return raw counts.
@@ -268,6 +291,8 @@ class OrangeDataReader:
         with open(self.file_path, "rb") as f:
             header = self.parse_header(f)
             samples = self.read_samples(f)
+            if self.n_samples and len(samples) == self.n_samples:
+                self.end_time = self.parse_end_stamp(f)
 
         if samples.size == 0:
             self.logger.warning(f"No samples read from {self.file_path}")
@@ -343,9 +368,11 @@ class OrangeReader:
         """
         # Read all files and concatenate
         dfs = []
+        readers = []
         for file_path in self.files:
             reader = OrangeDataReader(file_path)
             df = reader.read()
+            readers.append((reader, len(df)))
 
             # Store header from first file
             if self.header is None:
@@ -361,6 +388,14 @@ class OrangeReader:
 
         if not dfs:
             raise ValueError(f"No data read from files: {self.files}")
+
+        problems = self._find_breaks(readers)
+        if problems:
+            raise ValueError(
+                "Orange Box files do not make one run: "
+                + "; ".join(problems)
+                + ". Read each contiguous set on its own."
+            )
 
         # Concatenate all dataframes
         self.data = pd.concat(dfs, ignore_index=True)
@@ -429,6 +464,41 @@ class OrangeReader:
             station_metadata=station_meta,
             run_metadata=run_meta,
         )
+
+    @staticmethod
+    def _find_breaks(readers: list) -> List[str]:
+        """
+        Say where consecutive files do not join.
+
+        The samples are joined end to end and dated from the first file's
+        start, so each file has to start where the one before ended: at its
+        end stamp, or at its start plus its samples over the rate when it has
+        none, to JOIN_TOLERANCE_S.
+
+        :param readers: (OrangeDataReader, samples read) per file, in order
+        :type readers: list
+        :return: one message per break, empty when the files join
+        :rtype: list of str
+        """
+        problems = []
+        for (prev, n_prev), (this, _) in zip(readers, readers[1:]):
+            names = f"{prev.file_path.name} and {this.file_path.name}"
+            if prev.sample_rate != this.sample_rate:
+                problems.append(
+                    f"{names} differ in rate, {prev.sample_rate} and {this.sample_rate} Hz"
+                )
+                continue
+            if prev.start_time is None or this.start_time is None:
+                problems.append(f"{names}: a start stamp is not readable")
+                continue
+            end = prev.end_time
+            if end is None:
+                end = prev.start_time + pd.Timedelta(seconds=n_prev / prev.sample_rate)
+            step = (this.start_time - end).total_seconds()
+            if abs(step) > JOIN_TOLERANCE_S:
+                what = f"{step:.0f} s missing" if step > 0 else f"{-step:.0f} s overlap"
+                problems.append(f"{what} between {names}")
+        return problems
 
     def _build_station_metadata(self) -> Station:
         """Build station metadata object."""
