@@ -269,7 +269,7 @@ class OrangeDataReader:
         for ch in (0, 1, 2, 6, 7):
             counts[:, ch] -= ADC_ZERO
 
-        self.logger.info(f"Read {n} samples from {self.file_path.name}")
+        self.logger.debug(f"Decoded {n} records from {self.file_path.name}")
         return counts
 
     def parse_end_stamp(self, f):
@@ -361,8 +361,28 @@ class OrangeReader:
         ...                      dipole_length_ex=100.0, dipole_length_ey=100.0)
     """
 
+    # keyword -> (default, what the default means), each named in a warning
+    # when it is not given
+    DEFAULTS = {
+        "station_id": ("OrangeBox", ""),
+        "dipole_length_ex": (100.0, "m"),
+        "dipole_length_ey": (100.0, "m"),
+        "latitude": (0.0, ""),
+        "longitude": (0.0, ""),
+        "elevation": (0.0, "m"),
+        "electric_full_scale_uv": (
+            ELECTRIC_FULL_SCALE_UV,
+            "uV, the +/-10 V boxes; 25000 for the earlier +/-2.5 V ones",
+        ),
+        "magnetic_full_scale_nt": (
+            BARTINGTON_FULL_SCALE_NT,
+            "nT; 100000 for a 100,000 nT sensor",
+        ),
+    }
+
     def __init__(self, files: Union[str, Path, List[Union[str, Path]]], **kwargs):
         self.files = [Path(f) for f in (files if isinstance(files, list) else [files])]
+        self.defaults_used = [key for key in self.DEFAULTS if key not in kwargs]
         self.station_id = kwargs.get("station_id", "OrangeBox")
         self.dipole_length_ex = kwargs.get("dipole_length_ex", 100.0)
         self.dipole_length_ey = kwargs.get("dipole_length_ey", 100.0)
@@ -410,6 +430,15 @@ class OrangeReader:
 
         if not dfs:
             raise ValueError(f"No data read from files: {self.files}")
+
+        if self.defaults_used:
+            self.logger.warning(
+                "read_orange defaults used, pass them if they are not right: "
+                + "; ".join(
+                    f"{key} {self.DEFAULTS[key][0]!r} {self.DEFAULTS[key][1]}".strip()
+                    for key in self.defaults_used
+                )
+            )
 
         problems = self._find_breaks(readers)
         if problems:

@@ -101,3 +101,52 @@ class TestFullScale:
         assert r["ex"].names == ["orange_electric_ex_20.0m_25000uv"]
         # a quarter of the full scale: E four times smaller once calibrated
         assert r["ex"].filters_list[0].gain == pytest.approx(-(2**23) * 20 / 25000)
+
+
+def logged(action, level="INFO"):
+    from loguru import logger
+
+    messages = []
+    handler = logger.add(lambda m: messages.append(m.record), level=level)
+    try:
+        action()
+    finally:
+        logger.remove(handler)
+    return messages
+
+
+class TestMessages:
+    def test_defaults_are_named(self, tmp_path):
+        fn = write_file(tmp_path / "A.BIN", "2009-06-16 02:01:04")
+        records = logged(lambda: read_orange(fn, dipole_length_ex=15.0), "WARNING")
+        text = " ".join(r["message"] for r in records)
+        for key in ("station_id", "dipole_length_ey", "latitude", "electric_full_scale_uv"):
+            assert key in text
+        assert "dipole_length_ex" not in text
+
+    def test_nothing_defaulted(self, tmp_path):
+        fn = write_file(tmp_path / "A.BIN", "2009-06-16 02:01:04")
+        kwargs = dict(
+            station_id="ST61",
+            dipole_length_ex=15.0,
+            dipole_length_ey=15.0,
+            latitude=-31.0,
+            longitude=137.0,
+            elevation=100.0,
+            electric_full_scale_uv=25000.0,
+            magnetic_full_scale_nt=70000.0,
+        )
+        records = logged(lambda: read_orange(fn, **kwargs), "WARNING")
+        assert not any("defaults used" in r["message"] for r in records)
+
+    def test_one_line_per_file(self, tmp_path):
+        files = [
+            write_file(tmp_path / "HFM1-000.BIN", "2009-06-16 02:01:04"),
+            write_file(tmp_path / "HFM1-001.BIN", "2009-06-16 02:01:09"),
+        ]
+        records = logged(lambda: read(files))
+        for fn in files:
+            lines = [
+                r for r in records if r["level"].name == "INFO" and fn.name in r["message"]
+            ]
+            assert len(lines) == 1, lines
