@@ -116,7 +116,9 @@ class TestLEMI120Chain:
         names = [f.name for f in run.hx.channel_metadata.filters]
         assert names == ["uoa_bartington_hx"]
         assert any("sensor_type not given" in m for m in messages)
-        assert any("1000 Hz read with the Bartington fluxgate chain" in m for m in messages)
+        assert any(
+            "1000 Hz read with the Bartington fluxgate chain" in m for m in messages
+        )
 
         _, messages = self._warnings(
             lambda: read(files, sample_rate=10.0, sensor_type="bartington")
@@ -155,7 +157,9 @@ class TestLEMI120Chain:
 class TestChannelGain:
     def _run(self, tmp_path, **kwargs):
         write_edl(tmp_path, ["240101000000"])
-        return read(sorted(tmp_path.glob("TEST01_*")), sensor_type="bartington", **kwargs)
+        return read(
+            sorted(tmp_path.glob("TEST01_*")), sensor_type="bartington", **kwargs
+        )
 
     def test_default_chain_unchanged(self, tmp_path):
         run = self._run(tmp_path)
@@ -170,7 +174,10 @@ class TestChannelGain:
         """ex declared at x100 instead of the x10 box calibrates 10 times smaller"""
         default = self._run(tmp_path / "a")
         run = self._run(tmp_path / "b", channel_gain={"EX": 100.0, "hx": 10.0})
-        assert run.ex.channel_response.names == ["uoa_dipole_ex_50.0m", "uoa_gain_ex_x100"]
+        assert run.ex.channel_response.names == [
+            "uoa_dipole_ex_50.0m",
+            "uoa_gain_ex_x100",
+        ]
         assert run.ey.channel_response.names == default.ey.channel_response.names
         assert run.hx.channel_response.names == ["uoa_bartington_hx", "uoa_gain_hx_x10"]
         f = np.array([0.1, 1.0])

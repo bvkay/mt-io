@@ -323,9 +323,7 @@ class LEMICollection(Collection):
             entries.append(entry)
 
         if skipped:
-            counts = ", ".join(
-                f"{n} at {rate} Hz" for rate, n in skipped.items()
-            )
+            counts = ", ".join(f"{n} at {rate} Hz" for rate, n in skipped.items())
             self.logger.warning(
                 f"Skipped {sum(skipped.values())} file(s) not in sample_rates "
                 f"{list(sample_rates)}: {counts}"

@@ -1166,7 +1166,6 @@ class UoAReader:
         if any(channel in channel_data for channel in ("BX", "BY", "BZ")):
             self._check_sensor_type()
 
-        native_rate = None
         if self.decimate_to:
             ratio = self.sample_rate / float(self.decimate_to)
             if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
@@ -1180,7 +1179,6 @@ class UoAReader:
                     channel_data[channel] = decimate_series(
                         channel_data[channel], factor
                     )
-                native_rate = self.sample_rate
                 self.sample_rate = float(self.decimate_to)
                 self.n_samples = min(len(v) for v in channel_data.values())
                 self.logger.info(

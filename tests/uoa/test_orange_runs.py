@@ -120,7 +120,12 @@ class TestMessages:
         fn = write_file(tmp_path / "A.BIN", "2009-06-16 02:01:04")
         records = logged(lambda: read_orange(fn, dipole_length_ex=15.0), "WARNING")
         text = " ".join(r["message"] for r in records)
-        for key in ("station_id", "dipole_length_ey", "latitude", "electric_full_scale_uv"):
+        for key in (
+            "station_id",
+            "dipole_length_ey",
+            "latitude",
+            "electric_full_scale_uv",
+        ):
             assert key in text
         assert "dipole_length_ex" not in text
 
@@ -147,7 +152,9 @@ class TestMessages:
         records = logged(lambda: read(files))
         for fn in files:
             lines = [
-                r for r in records if r["level"].name == "INFO" and fn.name in r["message"]
+                r
+                for r in records
+                if r["level"].name == "INFO" and fn.name in r["message"]
             ]
             assert len(lines) == 1, lines
 

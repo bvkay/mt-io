@@ -90,7 +90,9 @@ class TestCollection:
         from mt_io.lemi import LEMICollection
 
         for k in range(2):
-            write_b423(tmp_path / f"{1624510579 + 2 * k}.B423", epoch=1624510579 + 2 * k)
+            write_b423(
+                tmp_path / f"{1624510579 + 2 * k}.B423", epoch=1624510579 + 2 * k
+            )
         lc = LEMICollection(tmp_path, file_ext=["B423"])
         df = lc.to_dataframe()
         assert len(df) == 2
@@ -137,7 +139,9 @@ class TestSampleRate:
         reader = Read_Lemi_Data(fn, {})
         summary, messages = self._warnings(reader.read_summary)
         assert summary["sample_rate"] is None
-        assert any("1624510579.B423" in m and "1 records per second" in m for m in messages)
+        assert any(
+            "1624510579.B423" in m and "1 records per second" in m for m in messages
+        )
         _, messages = self._warnings(reader.read_dataframe)
         assert reader.sample_rate is None
         assert any("1624510579.B423" in m for m in messages)
@@ -253,7 +257,11 @@ class TestGPSStatus:
         np.testing.assert_array_equal(df["sync"], np.arange(2000) % 7 - 3)
         assert df["sync"].dtype == np.int8 and df["stage"].dtype == np.uint8
         assert list(Read_Lemi_Data(fn, {}).read_dataframe().columns) == [
-            "Bx", "By", "Bz", "Ex", "Ey"
+            "Bx",
+            "By",
+            "Bz",
+            "Ex",
+            "Ey",
         ]
 
     def test_auxiliary_channels(self, tmp_path):
@@ -262,7 +270,9 @@ class TestGPSStatus:
         assert sorted(run.channels) == sorted(
             ["hx", "hy", "hz", "ex", "ey", "gps_sync", "gps_stage"]
         )
-        np.testing.assert_array_equal(run.dataset["gps_stage"].values, np.arange(2000) % 4)
+        np.testing.assert_array_equal(
+            run.dataset["gps_stage"].values, np.arange(2000) % 4
+        )
         assert run.gps_sync.channel_metadata.type == "auxiliary"
         plain = read_lemi423(fn)
         assert sorted(plain.channels) == ["ex", "ey", "hx", "hy", "hz"]
