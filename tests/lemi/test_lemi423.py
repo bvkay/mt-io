@@ -277,3 +277,13 @@ class TestGPSStatus:
         plain = read_lemi423(fn)
         assert sorted(plain.channels) == ["ex", "ey", "hx", "hy", "hz"]
         assert plain.dataset.equals(run.dataset[["hx", "hy", "hz", "ex", "ey"]])
+
+
+def test_blank_header_raises_value_error(tmp_path):
+    """A B423 file whose 1024-byte header block is all zero raises a ValueError naming it."""
+    from mt_io.lemi.lemi423 import Read_Lemi_Header
+
+    path = tmp_path / "1678734241.B423"
+    path.write_bytes(bytes(1024) + bytes(4096))
+    with pytest.raises(ValueError, match="1678734241.B423.*header unreadable"):
+        Read_Lemi_Header(path).read()
