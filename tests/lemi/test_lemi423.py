@@ -84,6 +84,15 @@ class TestHeader:
         run = read_lemi423(fn)
         assert run.station_metadata.location.elevation == pytest.approx(1060.0)
 
+    def test_blank_header_raises_value_error(self, tmp_path):
+        """A header block of zero bytes raises a ValueError naming the file"""
+        from mt_io.lemi.lemi423 import Read_Lemi_Header
+
+        path = tmp_path / "1678734241.B423"
+        path.write_bytes(bytes(1024) + bytes(4096))
+        with pytest.raises(ValueError, match="1678734241.B423.*header unreadable"):
+            Read_Lemi_Header(path).read()
+
 
 class TestCollection:
     def test_b423_listed_by_default(self, tmp_path):

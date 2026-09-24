@@ -166,6 +166,11 @@ class Read_Lemi_Header:
 
     def read(self) -> Dict:
         header = self._read_header()
+        if len(header) < 12 or not header[0].startswith("%LEMI"):
+            raise ValueError(
+                f"{self.binary_file}: B423 header unreadable (blank or truncated: "
+                f"{len(header)} line(s) in the first 1024 bytes)"
+            )
         self._extract_instrument_number(header)
         self._extract_firmware_version(header)
         self._extract_deployment_time(header)
