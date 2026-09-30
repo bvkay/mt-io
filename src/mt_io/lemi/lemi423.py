@@ -745,11 +745,55 @@ class LEMI423Reader:
             hdr["sample_rate"] = data_reader.sample_rate
         return df, hdr
 
+    def _fill_gaps(self, parts: List[pd.DataFrame], full: pd.DataFrame) -> pd.DataFrame:
+        """
+        Leave a gap of NaN where a file starts after the end of the one before.
+
+        Each channel is stamped from its first sample and the sample rate, so
+        without the gap the samples after it would be stamped early by its
+        length. The gap is filled with NaN at the sample rate, which makes
+        the channels float64, and a warning names the two files and the gap.
+        Gaps inside a file are not looked for.
+        """
+        step = pd.Timedelta(seconds=1.0 / self.sample_rate)
+        spans = sorted(
+            (part.index[0], part.index[-1], path)
+            for part, path in zip(parts, self.files)
+            if len(part)
+        )
+        fills = []
+        covered_to, before = spans[0][1], spans[0][2]
+        for first, last, path in spans[1:]:
+            gap = first - covered_to
+            if gap > 1.5 * step:
+                n_missing = int(round(gap / step)) - 1
+                self.logger.warning(
+                    f"{before.name} to {path.name}: {gap.total_seconds():.3f} s gap "
+                    f"between the files, {n_missing} samples left as NaN so the "
+                    "later samples keep their time stamps"
+                )
+                index = covered_to + step * np.arange(1, n_missing + 1)
+                fills.append(
+                    pd.DataFrame(
+                        np.nan,
+                        index=pd.DatetimeIndex(index, name=full.index.name),
+                        columns=full.columns,
+                    )
+                )
+            if last > covered_to:
+                covered_to, before = last, path
+        if not fills:
+            return full
+        return pd.concat([full] + fills).sort_index()
+
     def read(self) -> RunTS:
         """
         Read LEMI-423 file(s) and return a RunTS with channels hx, hy, hz, ex, ey.
 
-        Concatenates multiple files by timestamp, removes duplicates, and preserves gaps.
+        Concatenates multiple files by timestamp and removes duplicates. A
+        file that starts after the end of the one before leaves a gap of NaN
+        at the sample rate, with a warning naming the two files, so every
+        sample keeps its time stamp; the channels are then float64.
 
         :return: RunTS object containing ChannelTS for each component
         :rtype: :class:`mth5.timeseries.RunTS`
@@ -798,6 +842,10 @@ class LEMI423Reader:
             )
         else:
             self.sample_rate = None
+
+        if len(parts) > 1 and self.sample_rate:
+            full = self._fill_gaps(parts, full)
+            self.data = full
 
         self.logger.info(
             f"Read {len(parts)} file(s), {self.n_samples} samples at {self.sample_rate} Hz"
@@ -1022,7 +1070,8 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
     .. note::
         - LEMI-423 is a broadband MT instrument (data_type: "BBMT")
         - Files are concatenated by timestamp with duplicates removed
-        - Gaps in data are preserved (not interpolated)
+        - A gap between files is left as NaN at the sample rate, with a
+          warning naming the files, so later samples keep their time stamps
         - Linear calibration coefficients from file header are always applied
         - Coil response calibration requires explicit calibration_fn parameter
         - Electric field units are Volts (convert to V/m using dipole length)
