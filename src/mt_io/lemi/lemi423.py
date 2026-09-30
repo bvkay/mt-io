@@ -219,6 +219,8 @@ class Read_Lemi_Data:
     - **GPS status**: sync and stage, the only in-band record of GPS lock,
       are returned with ``read_dataframe(gps=True)``
     - **Unused fields**: CRC is read but discarded
+    - **Partial record**: a file that ends part way through a record gives
+      its whole records, with a warning naming the bytes left over
 
     Returns
     -------
@@ -262,6 +264,24 @@ class Read_Lemi_Data:
             "check the instrument"
         )
 
+    def _whole_records(self) -> Tuple[int, int]:
+        """
+        Count the whole records after the header, and the bytes left over.
+
+        A file that was cut short (a card that filled or failed, a copy that
+        stopped) ends part way through a 30 byte record. Only the whole
+        records are read; the bytes left over are reported, as the samples
+        that should have followed them are not in the file.
+        """
+        size = max(0, Path(self.binary_file).stat().st_size - 1024)
+        n_records, extra = divmod(size, self.binary_format.itemsize)
+        if extra:
+            logger.warning(
+                f"{Path(self.binary_file).name}: ends part way through a record, "
+                f"{n_records} whole records read and {extra} bytes left over"
+            )
+        return n_records, extra
+
     @staticmethod
     def _time_index(seconds: np.ndarray, ticks: np.ndarray) -> pd.DatetimeIndex:
         """
@@ -291,9 +311,10 @@ class Read_Lemi_Data:
         :type gps: bool
         """
         columns = ["Bx", "By", "Bz", "Ex", "Ey"] + (["sync", "stage"] if gps else [])
+        n_records, _ = self._whole_records()
         with open(self.binary_file, "rb") as f:
             f.read(1024)  # skip header
-            arr = np.fromfile(f, dtype=self.binary_format)
+            arr = np.fromfile(f, dtype=self.binary_format, count=n_records)
         if arr.size == 0:
             return pd.DataFrame(columns=columns).set_index(
                 pd.DatetimeIndex([], tz="UTC", name="time")
@@ -325,8 +346,7 @@ class Read_Lemi_Data:
         stamp anywhere in the file.
         """
         record = self.binary_format
-        size = Path(self.binary_file).stat().st_size
-        n_samples = max(0, (size - 1024) // record.itemsize)
+        n_samples, _ = self._whole_records()
         if n_samples == 0:
             return {"n_samples": 0, "start": None, "end": None, "sample_rate": None}
 
