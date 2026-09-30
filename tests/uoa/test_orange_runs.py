@@ -60,6 +60,25 @@ class TestJoin:
         with pytest.raises(ValueError, match="7200 s missing between HFM1-000.BIN"):
             read(files)
 
+    def _pair(self, tmp_path, step):
+        """Two files, the second starting `step` s after the first's end stamp"""
+        t0 = pd.Timestamp("2009-06-16 02:01:04")
+        t1 = t0 + pd.Timedelta(seconds=5 + step)
+        return [
+            write_file(tmp_path / "HFM1-000.BIN", str(t0)),
+            write_file(tmp_path / "HFM1-001.BIN", str(t1)),
+        ]
+
+    @pytest.mark.parametrize("step", [1, 2])
+    def test_whole_second_stamps_join(self, tmp_path, step):
+        """Real files start 0, 1 or 2 s after the end stamp before them"""
+        assert read(self._pair(tmp_path, step)).dataset.sizes["time"] == 100
+
+    @pytest.mark.parametrize("step, what", [(3, "3 s missing"), (-3, "3 s overlap")])
+    def test_three_seconds_refused(self, tmp_path, step, what):
+        with pytest.raises(ValueError, match=f"{what} between HFM1-000.BIN"):
+            read(self._pair(tmp_path, step))
+
     def test_without_end_stamps(self, tmp_path):
         """The start plus samples over the rate stands in for the end stamp"""
         a = write_file(tmp_path / "A.BIN", "2009-06-16 02:01:04", end_stamp=False)
