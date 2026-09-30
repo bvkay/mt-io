@@ -113,6 +113,44 @@ class TestCollection:
         assert len(df) == 0
         assert any("1 at 1000.0 Hz" in m for m in messages), messages
 
+    def test_blank_header_skipped(self, tmp_path):
+        """A zero header or a 0 byte file is left out with a warning"""
+        from mt_io.lemi import LEMICollection
+
+        for k in range(2):
+            write_b423(
+                tmp_path / f"{1624510579 + 2 * k}.B423", epoch=1624510579 + 2 * k
+            )
+        (tmp_path / "1624510583.B423").write_bytes(bytes(1024 + 2000 * 30))
+        (tmp_path / "1624510585.B423").write_bytes(b"")
+        lc = LEMICollection(tmp_path, file_ext=["B423"])
+        messages = []
+        handler = lc.logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            df = lc.to_dataframe()
+        finally:
+            lc.logger.remove(handler)
+        assert len(df) == 2
+        skipped = [m for m in messages if "header unreadable" in m and "skipping" in m]
+        assert len(skipped) == 2, messages
+        assert any("1624510583.B423" in m for m in skipped)
+        assert any("1624510585.B423" in m for m in skipped)
+
+    def test_garbled_header_raises(self, tmp_path):
+        """A header that is there but does not parse is not skipped"""
+        from mt_io.lemi import LEMICollection
+        from mt_io.lemi.lemi423 import B423HeaderError
+
+        write_b423(tmp_path / "1624510579.B423")
+        fn = write_b423(tmp_path / "1624510581.B423", epoch=1624510581)
+        raw = fn.read_bytes()
+        assert raw.count(b"%Lat 2944.90064,S") == 1
+        fn.write_bytes(raw.replace(b"%Lat 2944.90064,S", b"%Lat 29x4.9OO64,S"))
+        lc = LEMICollection(tmp_path, file_ext=["B423"])
+        with pytest.raises(ValueError, match="could not convert") as error:
+            lc.to_dataframe()
+        assert not isinstance(error.value, B423HeaderError)
+
 
 class TestSampleRate:
     def _warnings(self, action):

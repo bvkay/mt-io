@@ -44,6 +44,15 @@ from mt_timeseries import ChannelTS, RunTS
 B423_EXTS = {"b423"}
 
 
+class B423HeaderError(ValueError):
+    """
+    A B423 file with no readable header.
+
+    The first 1024 bytes hold no ``%LEMI`` header: all zero, as a card that
+    fails mid-record leaves them, or too short, as in a 0 byte file.
+    """
+
+
 class Read_Lemi_Header:
     """
     Parse LEMI-423 ASCII header (1024 bytes).
@@ -167,7 +176,7 @@ class Read_Lemi_Header:
     def read(self) -> Dict:
         header = self._read_header()
         if len(header) < 12 or not header[0].startswith("%LEMI"):
-            raise ValueError(
+            raise B423HeaderError(
                 f"{self.binary_file}: B423 header unreadable (blank or truncated: "
                 f"{len(header)} line(s) in the first 1024 bytes)"
             )
