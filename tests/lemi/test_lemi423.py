@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mt_io.lemi.lemi423 import Read_Lemi_Data, Read_Lemi_Header, read_lemi423
+from mt_io.lemi.lemi423 import read_lemi423, Read_Lemi_Data, Read_Lemi_Header
 
 RECORD = Read_Lemi_Data.binary_format
 
