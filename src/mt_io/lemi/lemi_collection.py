@@ -22,7 +22,7 @@ import pandas as pd
 
 from mt_io.collection import Collection
 from mt_io.lemi import LEMI417, LEMI424
-from mt_io.lemi.lemi423 import Read_Lemi_Data, Read_Lemi_Header
+from mt_io.lemi.lemi423 import B423HeaderError, Read_Lemi_Data, Read_Lemi_Header
 
 # =============================================================================
 
@@ -259,8 +259,14 @@ class LEMICollection(Collection):
             elif fn_path.suffix.lower() in [".b423"]:
                 # LEMI-423: the records are fixed width, so the summary comes
                 # from the header and the first and last records rather than
-                # parsing the whole file
-                hdr = Read_Lemi_Header(fn_path).read()
+                # parsing the whole file. A file with a blank header (a card
+                # that failed, a 0 byte file) is left out with a warning, and
+                # the rest of the folder is still listed
+                try:
+                    hdr = Read_Lemi_Header(fn_path).read()
+                except B423HeaderError as error:
+                    self.logger.warning(f"{error}, skipping")
+                    continue
                 summary = Read_Lemi_Data(fn_path, hdr["coefficients"]).read_summary()
 
                 # LEMI-423 supports: 4000, 2000, 1000, 500, 250 Hz
