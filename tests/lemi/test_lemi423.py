@@ -239,6 +239,41 @@ class TestVectorisedRead:
         assert forward.dataset.equals(backward.dataset)
         assert forward.dataset.sizes["time"] == 6000
 
+    def _split(self, tmp_path, first, second):
+        """Two files holding the record ranges first and second of one 5 s run"""
+        whole = write_b423(tmp_path / "1624510579.B423", n=5000)
+        data = whole.read_bytes()
+        files = []
+        for k, (i0, i1) in enumerate((first, second)):
+            fn = tmp_path / f"part{k}.B423"
+            fn.write_bytes(
+                data[:1024]
+                + data[1024 + i0 * RECORD.itemsize : 1024 + i1 * RECORD.itemsize]
+            )
+            files.append(fn)
+        return whole, files
+
+    def test_overlapping_files(self, tmp_path):
+        """Records in both files are kept once"""
+        whole, files = self._split(tmp_path, (0, 3000), (2000, 5000))
+        run = read_lemi423(files)
+        assert run.dataset.sizes["time"] == 5000
+        assert run.dataset.equals(read_lemi423(whole).dataset)
+
+        # what the reader did before the integer index: concat, sort, drop
+        frames = [Read_Lemi_Data(fn, {}).read_dataframe() for fn in files]
+        want = pd.concat(frames).sort_index()
+        want = want[~want.index.duplicated(keep="first")]
+        channels = {"Bx": "hx", "By": "hy", "Bz": "hz", "Ex": "ex", "Ey": "ey"}
+        for name, code in channels.items():
+            np.testing.assert_array_equal(run.dataset[code].values, want[name])
+
+    def test_same_file_twice(self, tmp_path):
+        fn = write_b423(tmp_path / "1624510579.B423", n=3000)
+        run = read_lemi423([fn, fn])
+        assert run.dataset.sizes["time"] == 3000
+        assert run.dataset.equals(read_lemi423(fn).dataset)
+
 
 class TestGPSStatus:
     def _file(self, tmp_path):
