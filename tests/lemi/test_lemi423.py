@@ -420,3 +420,122 @@ class TestPartialRecord:
         fn = write_b423(tmp_path / "1695393386.B423", epoch=1695393386, n=2000)
         _, messages = self._warnings(Read_Lemi_Data(fn, {}).read_dataframe)
         assert messages == []
+
+
+class TestGapBetweenFiles:
+    def _read(self, files, **kwargs):
+        from loguru import logger
+
+        messages = []
+        handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            run = read_lemi423(files, **kwargs)
+        finally:
+            logger.remove(handler)
+        return run, [m for m in messages if "gap between the files" in m]
+
+    def _refused(self, files):
+        with pytest.raises(ValueError, match="do not make one contiguous run") as error:
+            read_lemi423(files)
+        return str(error.value)
+
+    def _inside(self, tmp_path):
+        """A long file, a file whose records lie inside it, and one after a gap"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=10000)
+        size, data = RECORD.itemsize, a.read_bytes()
+        inner = tmp_path / "1624510581.B423"
+        inner.write_bytes(data[:1024] + data[1024 + 2000 * size : 1024 + 4000 * size])
+        c = write_b423(tmp_path / "1624510592.B423", epoch=1624510592, n=2000)
+        return [a, inner, c]
+
+    def test_gap_refused(self, tmp_path):
+        """Files with a gap between them raise, naming both files and the gap"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510584.B423", epoch=1624510584, n=2000)
+        message = self._refused([a, b])
+        assert "1624510579.B423 to 1624510584.B423: 3.001 s gap" in message
+        assert "LEMICollection" in message
+        assert "fill_gaps=True" in message
+
+    def test_gap_refused_out_of_order(self, tmp_path):
+        """The gap is found when the later file is given first"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510584.B423", epoch=1624510584, n=2000)
+        assert "1624510579.B423 to 1624510584.B423" in self._refused([b, a])
+
+    def test_gap_refused_after_files_that_join(self, tmp_path):
+        """The error names the file the gap follows, not the first of a chain"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510581.B423", epoch=1624510581, n=2000)
+        c = write_b423(tmp_path / "1624510586.B423", epoch=1624510586, n=2000)
+        assert "1624510581.B423 to 1624510586.B423" in self._refused([a, b, c])
+
+    def test_gap_refused_after_file_inside_another(self, tmp_path):
+        """A gap after a file inside another is measured from the outer one"""
+        message = self._refused(self._inside(tmp_path))
+        assert "1624510579.B423 to 1624510592.B423: 3.001 s gap" in message
+
+    def test_files_that_join_are_quiet(self, tmp_path):
+        """Files that join read as one run with no warning and no NaN"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510581.B423", epoch=1624510581, n=2000)
+        run, gaps = self._read([a, b])
+        assert gaps == []
+        assert run.dataset.time.size == 4000
+        assert not np.isnan(run.dataset.hx.values).any()
+
+    def test_gap_left_as_nan(self, tmp_path):
+        """With fill_gaps the samples after a gap keep their own time stamps"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510584.B423", epoch=1624510584, n=2000)
+        run, gaps = self._read([a, b], fill_gaps=True)
+        assert len(gaps) == 1, gaps
+        assert "1624510579.B423 to 1624510584.B423: 3.001 s gap" in gaps[0]
+        assert "3000 samples left as NaN" in gaps[0]
+        times = pd.DatetimeIndex(run.dataset.time.values)
+        assert times.size == 7000
+        assert times[5000] == pd.Timestamp(1624510584, unit="s")
+        assert times[-1] == pd.Timestamp(1624510584, unit="s") + pd.Timedelta("1999ms")
+        hx = run.dataset.hx.values
+        assert np.isnan(hx[2000:5000]).all()
+        np.testing.assert_array_equal(hx[:2000], np.arange(2000) - 1000)
+        np.testing.assert_array_equal(hx[5000:], np.arange(2000) - 1000)
+
+    def test_gap_filled_out_of_order(self, tmp_path):
+        """With fill_gaps the gap is found when the later file is given first"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510584.B423", epoch=1624510584, n=2000)
+        run, gaps = self._read([b, a], fill_gaps=True)
+        assert len(gaps) == 1, gaps
+        assert "1624510579.B423 to 1624510584.B423: 3.001 s gap" in gaps[0]
+        times = pd.DatetimeIndex(run.dataset.time.values)
+        assert times.size == 7000
+        assert times[5000] == pd.Timestamp(1624510584, unit="s")
+
+    def test_gap_filled_after_file_inside_another(self, tmp_path):
+        """A filled gap after a file inside another starts where the outer one ends"""
+        run, gaps = self._read(self._inside(tmp_path), fill_gaps=True)
+        assert len(gaps) == 1, gaps
+        assert "1624510579.B423 to 1624510592.B423: 3.001 s gap" in gaps[0]
+        assert "3000 samples left as NaN" in gaps[0]
+        times = pd.DatetimeIndex(run.dataset.time.values)
+        assert times.size == 15000
+        assert times.is_unique
+        assert times[13000] == pd.Timestamp(1624510592, unit="s")
+        hx = run.dataset.hx.values
+        np.testing.assert_array_equal(hx[:10000], np.arange(10000) - 1000)
+        assert np.isnan(hx[10000:13000]).all()
+        np.testing.assert_array_equal(hx[13000:], np.arange(2000) - 1000)
+
+    def test_gap_filled_after_files_that_join(self, tmp_path):
+        """The fill warning names the file the gap follows, not the first of a chain"""
+        a = write_b423(tmp_path / "1624510579.B423", epoch=1624510579, n=2000)
+        b = write_b423(tmp_path / "1624510581.B423", epoch=1624510581, n=2000)
+        c = write_b423(tmp_path / "1624510586.B423", epoch=1624510586, n=2000)
+        run, gaps = self._read([a, b, c], fill_gaps=True)
+        assert len(gaps) == 1, gaps
+        assert "1624510581.B423 to 1624510586.B423: 3.001 s gap" in gaps[0]
+        assert "3000 samples left as NaN" in gaps[0]
+        times = pd.DatetimeIndex(run.dataset.time.values)
+        assert times.size == 9000
+        assert times[7000] == pd.Timestamp(1624510586, unit="s")

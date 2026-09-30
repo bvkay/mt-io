@@ -499,6 +499,8 @@ class LEMI423Reader:
         * **station_id** (str) - Station identifier (optional)
         * **gps_status** (bool) - add the per-record GPS columns as
           auxiliary channels gps_sync and gps_stage (default: False)
+        * **fill_gaps** (bool) - leave a gap between files as NaN at the
+          sample rate instead of raising (default: False)
 
     **Filter Chain** (physical to recorded):
         - Magnetic (optional): LEMI-120 coil response (nT -> nT, normalized)
@@ -515,6 +517,7 @@ class LEMI423Reader:
         self.station_id = kwargs.get("station_id", None)
         self.calibration_fn = kwargs.get("calibration_fn", None)
         self.gps_status = kwargs.get("gps_status", False)
+        self.fill_gaps = kwargs.get("fill_gaps", False)
         self.data = None
         self.header = None
 
@@ -745,11 +748,74 @@ class LEMI423Reader:
             hdr["sample_rate"] = data_reader.sample_rate
         return df, hdr
 
+    def _gaps(
+        self, parts: List[pd.DataFrame], longer_than: pd.Timedelta
+    ) -> List[Tuple[Path, Path, pd.Timestamp, pd.Timedelta]]:
+        """
+        Find where a file starts more than `longer_than` after the end of the
+        files before it.
+
+        Each gap is given as the file it follows, the file after it, the
+        last stamp before it and its length. A file whose records lie inside
+        another's does not move the end. Gaps inside a file are not looked
+        for.
+        """
+        spans = sorted(
+            (part.index[0], part.index[-1], path)
+            for part, path in zip(parts, self.files)
+            if len(part)
+        )
+        gaps = []
+        covered_to, before = spans[0][1], spans[0][2]
+        for first, last, path in spans[1:]:
+            gap = first - covered_to
+            if gap > longer_than:
+                gaps.append((before, path, covered_to, gap))
+            if last > covered_to:
+                covered_to, before = last, path
+        return gaps
+
+    def _fill_gaps(self, parts: List[pd.DataFrame], full: pd.DataFrame) -> pd.DataFrame:
+        """
+        Leave a gap of NaN where a file starts after the end of the one before.
+
+        Each channel is stamped from its first sample and the sample rate, so
+        without the gap the samples after it would be stamped early by its
+        length. The gap is filled with NaN at the sample rate, which makes
+        the channels float64, and a warning names the two files and the gap.
+        """
+        step = pd.Timedelta(seconds=1.0 / self.sample_rate)
+        fills = []
+        for before, path, covered_to, gap in self._gaps(parts, 1.5 * step):
+            n_missing = int(round(gap / step)) - 1
+            self.logger.warning(
+                f"{before.name} to {path.name}: {gap.total_seconds():.3f} s gap "
+                f"between the files, {n_missing} samples left as NaN so the "
+                "later samples keep their time stamps"
+            )
+            index = covered_to + step * np.arange(1, n_missing + 1)
+            fills.append(
+                pd.DataFrame(
+                    np.nan,
+                    index=pd.DatetimeIndex(index, name=full.index.name),
+                    columns=full.columns,
+                )
+            )
+        if not fills:
+            return full
+        return pd.concat([full] + fills).sort_index()
+
     def read(self) -> RunTS:
         """
         Read LEMI-423 file(s) and return a RunTS with channels hx, hy, hz, ex, ey.
 
-        Concatenates multiple files by timestamp, removes duplicates, and preserves gaps.
+        Concatenates multiple files by timestamp and removes duplicates. A
+        file that starts later than the next sample after the end of the
+        files before it raises a ValueError naming both files, since the
+        samples after the gap would be stamped early; LEMICollection starts
+        a new run at such a gap. With fill_gaps=True the gap is left as NaN
+        at the sample rate instead, with a warning, and the channels are
+        then float64.
 
         :return: RunTS object containing ChannelTS for each component
         :rtype: :class:`mth5.timeseries.RunTS`
@@ -798,6 +864,26 @@ class LEMI423Reader:
             )
         else:
             self.sample_rate = None
+
+        if len(parts) > 1 and self.sample_rate:
+            if self.fill_gaps:
+                full = self._fill_gaps(parts, full)
+                self.data = full
+            else:
+                step = pd.Timedelta(seconds=1.0 / self.sample_rate)
+                gaps = self._gaps(parts, step)
+                if gaps:
+                    raise ValueError(
+                        "B423 files do not make one contiguous run: "
+                        + "; ".join(
+                            f"{before.name} to {path.name}: "
+                            f"{gap.total_seconds():.3f} s gap"
+                            for before, path, _, gap in gaps
+                        )
+                        + ". LEMICollection starts a new run at such a gap, so "
+                        "read its runs one at a time, or pass fill_gaps=True to "
+                        "leave each gap as NaN."
+                    )
 
         self.logger.info(
             f"Read {len(parts)} file(s), {self.n_samples} samples at {self.sample_rate} Hz"
@@ -984,6 +1070,8 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
         * **dipole_length_ex** (float) - Ex dipole length in meters (default: 0)
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 0)
         * **station_id** (str) - Station identifier (optional)
+        * **fill_gaps** (bool) - leave a gap between files as NaN at the
+          sample rate instead of raising (default: False)
 
     :return: RunTS with channels hx, hy, hz, ex, ey (RAW counts)
     :rtype: RunTS
@@ -1022,7 +1110,10 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
     .. note::
         - LEMI-423 is a broadband MT instrument (data_type: "BBMT")
         - Files are concatenated by timestamp with duplicates removed
-        - Gaps in data are preserved (not interpolated)
+        - A file that starts later than the next sample after the files
+          before it raises a ValueError naming both files; LEMICollection
+          starts a new run there. fill_gaps=True leaves the gap as NaN at
+          the sample rate instead
         - Linear calibration coefficients from file header are always applied
         - Coil response calibration requires explicit calibration_fn parameter
         - Electric field units are Volts (convert to V/m using dipole length)
