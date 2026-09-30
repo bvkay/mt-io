@@ -295,3 +295,54 @@ class TestGPSStatus:
         plain = read_lemi423(fn)
         assert sorted(plain.channels) == ["ex", "ey", "hx", "hy", "hz"]
         assert plain.dataset.equals(run.dataset[["hx", "hy", "hz", "ex", "ey"]])
+
+
+class TestPartialRecord:
+    """A file that ends part way through a record, as a cut copy leaves it"""
+
+    def _cut(self, tmp_path, n_whole=1000, extra=17):
+        fn = write_b423(tmp_path / "1695393386.B423", epoch=1695393386, n=2000)
+        intact = Read_Lemi_Data(fn, {}).read_dataframe()
+        fn.write_bytes(fn.read_bytes()[: 1024 + n_whole * RECORD.itemsize + extra])
+        return fn, intact
+
+    def _warnings(self, action):
+        from loguru import logger
+
+        messages = []
+        handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            result = action()
+        finally:
+            logger.remove(handler)
+        return result, [m for m in messages if "part way through a record" in m]
+
+    def test_whole_records_read(self, tmp_path):
+        """Whole records are read and one warning gives the bytes left over"""
+        fn, intact = self._cut(tmp_path)
+        df, messages = self._warnings(Read_Lemi_Data(fn, {}).read_dataframe)
+        pd.testing.assert_frame_equal(df, intact.iloc[:1000], check_exact=True)
+        assert len(messages) == 1, messages
+        assert "1695393386.B423" in messages[0]
+        assert "1000 whole records read and 17 bytes left over" in messages[0]
+
+    def test_summary(self, tmp_path):
+        """read_summary counts the whole records only and warns once"""
+        fn, intact = self._cut(tmp_path)
+        summary, messages = self._warnings(Read_Lemi_Data(fn, {}).read_summary)
+        assert summary["n_samples"] == 1000
+        assert summary["end"] == intact.index[999]
+        assert len(messages) == 1, messages
+
+    def test_reader(self, tmp_path):
+        """read_lemi423 reads the whole records and the warning names the file"""
+        fn, _ = self._cut(tmp_path)
+        run, messages = self._warnings(lambda: read_lemi423(fn))
+        assert run.dataset.sizes["time"] == 1000
+        assert any("1695393386.B423" in m for m in messages), messages
+
+    def test_whole_file_is_quiet(self, tmp_path):
+        """A file of whole records gives no warning"""
+        fn = write_b423(tmp_path / "1695393386.B423", epoch=1695393386, n=2000)
+        _, messages = self._warnings(Read_Lemi_Data(fn, {}).read_dataframe)
+        assert messages == []
