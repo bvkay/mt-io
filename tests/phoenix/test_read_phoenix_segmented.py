@@ -32,6 +32,13 @@ except ImportError:
 # =============================================================================
 
 
+def first_burst(bursts):
+    """Check the 12 bursts of a sample td_24k file and return the first."""
+    assert isinstance(bursts, list)
+    assert len(bursts) == 12
+    return bursts[0]
+
+
 @pytest.fixture(scope="module")
 def phoenix_data_path():
     """Phoenix test data path."""
@@ -554,7 +561,7 @@ class TestPhoenixSegmentedReader:
             / "10128_608783F4_0_00000001.td_24k"
         )
 
-        ch_ts = reader.to_channel_ts(rxcal_fn=rxcal_fn)
+        ch_ts = first_burst(reader.to_channel_ts(rxcal_fn=rxcal_fn))
         expected_filters = expected_filter_names["0"]
 
         # Test key metadata fields without the problematic ones
@@ -624,7 +631,7 @@ class TestPhoenixSegmentedReader:
             pytest.skip(f"Channel {channel} data not available")
 
         reader = open_phoenix(file_path)
-        ch_ts = reader.to_channel_ts(rxcal_fn=rxcal_fn)
+        ch_ts = first_burst(reader.to_channel_ts(rxcal_fn=rxcal_fn))
 
         expected_metadata = expected_channel_metadata[channel]
         expected_filters = expected_filter_names[channel]
@@ -738,7 +745,7 @@ class TestPhoenixSegmentedReaderAdvanced:
             pytest.skip(f"Channel {channel} data not available")
 
         reader = open_phoenix(file_path)
-        ch_ts = reader.to_channel_ts(rxcal_fn=rxcal_fn)
+        ch_ts = first_burst(reader.to_channel_ts(rxcal_fn=rxcal_fn))
 
         # All channels should have channel response
         assert ch_ts.channel_response is not None
@@ -781,7 +788,7 @@ class TestPhoenixSegmentedReaderAdvanced:
                 / channel_files[channel]
             )
             reader = open_phoenix(file_path)
-            ch_ts = reader.to_channel_ts(rxcal_fn=rxcal_fn)
+            ch_ts = first_burst(reader.to_channel_ts(rxcal_fn=rxcal_fn))
             channel_ts_list.append((channel, ch_ts))
 
         # Test that common metadata is consistent - only test fields that exist for all channel types
@@ -825,7 +832,7 @@ class TestPhoenixSegmentedReaderAdvanced:
             )
             if file_path.exists():
                 reader = open_phoenix(file_path)
-                ch_ts = reader.to_channel_ts(rxcal_fn=rxcal_fn)
+                ch_ts = first_burst(reader.to_channel_ts(rxcal_fn=rxcal_fn))
 
                 # Magnetic channels should have type "magnetic"
                 assert ch_ts.channel_metadata.get_attr_from_name("type") == "magnetic"
@@ -845,7 +852,7 @@ class TestPhoenixSegmentedReaderAdvanced:
             )
             if file_path.exists():
                 reader = open_phoenix(file_path)
-                ch_ts = reader.to_channel_ts(rxcal_fn=rxcal_fn)
+                ch_ts = first_burst(reader.to_channel_ts(rxcal_fn=rxcal_fn))
 
                 # Electric channels should have type "electric"
                 assert ch_ts.channel_metadata.get_attr_from_name("type") == "electric"
@@ -971,10 +978,10 @@ class TestPhoenixSegmentedReaderAdvanced:
         )
 
         # Test with calibration
-        ch_ts_with_cal = reader_with_cal.to_channel_ts(rxcal_fn=rxcal_fn)
+        ch_ts_with_cal = first_burst(reader_with_cal.to_channel_ts(rxcal_fn=rxcal_fn))
 
         # Test without calibration
-        ch_ts_without_cal = reader_without_cal.to_channel_ts()
+        ch_ts_without_cal = first_burst(reader_without_cal.to_channel_ts())
 
         # Both should have filters, but different counts/types
         filters_with = ch_ts_with_cal.channel_metadata.get_attr_from_name("filters")
@@ -1012,7 +1019,7 @@ class TestPhoenixSegmentedReaderAdvanced:
                 )
                 if file_path.exists():
                     reader = open_phoenix(file_path)
-                    ch_ts = reader.to_channel_ts()
+                    ch_ts = first_burst(reader.to_channel_ts())
                     actual_component = ch_ts.channel_metadata.get_attr_from_name(
                         "component"
                     )

@@ -103,6 +103,8 @@ class PhoenixCollection(Collection):
         }
 
         super().__init__(file_path=file_path, **kwargs)
+        # position of a burst in its segmented file, <NA> for continuous data
+        self._columns = self._columns + ["segment"]
 
         self.metadata_dict = {}
 
@@ -205,7 +207,8 @@ class PhoenixCollection(Collection):
         Returns
         -------
         pd.DataFrame
-            DataFrame with one row per file containing columns:
+            DataFrame with one row per continuous file, and one row per
+            burst of a segmented file (td_24k), containing columns:
 
             - survey: Survey ID from metadata
             - station: Station ID from metadata
@@ -221,6 +224,9 @@ class PhoenixCollection(Collection):
             - sequence_number: File sequence number for continuous data
             - instrument_id: Recording/receiver ID
             - calibration_fn: Path to calibration file (currently None)
+            - segment: Position of the burst in its segmented file, 0 for
+              the first, so ``read_phoenix(fn)[segment]`` is that burst;
+              <NA> for continuous files (an Int64 column)
 
         Examples
         --------
@@ -285,41 +291,59 @@ class PhoenixCollection(Collection):
                     except OSError:
                         self.logger.warning(f"Skipping {fn.name}")
                         continue
-                    if hasattr(phx_obj, "read_segment"):
-                        segment = phx_obj.read_segment(metadata_only=True)
-                        try:
-                            start = segment.segment_start_time.isoformat()
-                        except IOError:
-                            self.logger.warning(f"Could not read file {fn}, SKIPPING")
+                    if hasattr(phx_obj, "read_segments"):
+                        # every burst of the file, from its sub-header
+                        segments = phx_obj.read_segments(metadata_only=True)
+                        if not segments:
+                            self.logger.warning(f"No bursts in {fn}, SKIPPING")
                             continue
-                        end = segment.segment_end_time.isoformat()
-                        n_samples = segment.n_samples
+                        rows = [
+                            (
+                                segment.segment_start_time.isoformat(),
+                                segment.segment_end_time.isoformat(),
+                                segment.n_samples,
+                                segment.segment,
+                            )
+                            for segment in segments
+                        ]
 
                     else:
-                        start = phx_obj.segment_start_time.isoformat()
-                        end = phx_obj.segment_end_time.isoformat()
-                        n_samples = phx_obj.max_samples
+                        rows = [
+                            (
+                                phx_obj.segment_start_time.isoformat(),
+                                phx_obj.segment_end_time.isoformat(),
+                                phx_obj.max_samples,
+                                None,
+                            )
+                        ]
 
-                    entry = self.get_empty_entry_dict()
-                    entry["survey"] = receiver_metadata.survey_metadata.id
-                    entry["station"] = receiver_metadata.station_metadata.id
-                    entry["run"] = (None,)
-                    entry["start"] = start
-                    entry["end"] = end
-                    entry["channel_id"] = phx_obj.channel_id
-                    entry["component"] = receiver_metadata.channel_map[
-                        phx_obj.channel_id
-                    ]
-                    entry["fn"] = fn
-                    entry["sample_rate"] = phx_obj.sample_rate
-                    entry["file_size"] = phx_obj.file_size
-                    entry["n_samples"] = n_samples
-                    entry["sequence_number"] = phx_obj.seq
-                    entry["instrument_id"] = phx_obj.recording_id
-                    entry["calibration_fn"] = None
-                    entries.append(entry)
+                    for start, end, n_samples, segment_index in rows:
+                        entry = self.get_empty_entry_dict()
+                        entry["survey"] = receiver_metadata.survey_metadata.id
+                        entry["station"] = receiver_metadata.station_metadata.id
+                        entry["run"] = (None,)
+                        entry["start"] = start
+                        entry["end"] = end
+                        entry["channel_id"] = phx_obj.channel_id
+                        entry["component"] = receiver_metadata.channel_map[
+                            phx_obj.channel_id
+                        ]
+                        entry["fn"] = fn
+                        entry["sample_rate"] = phx_obj.sample_rate
+                        entry["file_size"] = phx_obj.file_size
+                        entry["n_samples"] = n_samples
+                        entry["sequence_number"] = phx_obj.seq
+                        entry["instrument_id"] = phx_obj.recording_id
+                        entry["calibration_fn"] = None
+                        entry["segment"] = segment_index
+                        entries.append(entry)
 
-        df = self._sort_df(self._set_df_dtypes(pd.DataFrame(entries)), run_name_zeros)
+        df = pd.DataFrame(entries)
+        if "segment" in df.columns:
+            # None in the rows of continuous files would make the column
+            # float, and a float does not index the list read_phoenix returns
+            df["segment"] = df["segment"].astype("Int64")
+        df = self._sort_df(self._set_df_dtypes(df), run_name_zeros)
 
         return df
 
@@ -377,8 +401,8 @@ class PhoenixCollection(Collection):
 
         **Segmented Data (≥ 1000 Hz):**
 
-        - Each unique start time receives a new run ID
-        - Typically results in one run per segment/file
+        - Each unique start time of a station receives a new run ID
+        - The rows are bursts, so this is one run per burst
 
         The run naming scheme uses the sample rate in the identifier:
 
@@ -437,9 +461,12 @@ class PhoenixCollection(Collection):
                         "start",
                     ].unique()
                     for ii, s in enumerate(starts, 1):
-                        rdf.loc[(rdf.start == s) & (rdf.sample_rate == sr), "run"] = (
-                            f"sr{run_stem}_{ii:0{zeros}}"
-                        )
+                        rdf.loc[
+                            (rdf.station == station)
+                            & (rdf.start == s)
+                            & (rdf.sample_rate == sr),
+                            "run",
+                        ] = f"sr{run_stem}_{ii:0{zeros}}"
 
         return rdf
 
@@ -526,8 +553,10 @@ class PhoenixCollection(Collection):
 
         **For Segmented Data (≥ 1000 Hz):**
 
-        Returns the first file for each segment. Each segment must be read
-        separately.
+        One run per burst: every burst of every segmented file is its own
+        run (a 6 minute td_24k file of the MTU-8A holds 12). Each row names
+        the file and, in ``segment``, the burst's position in it, so
+        ``read_phoenix(row.fn)[row.segment]`` is that channel of the run.
 
         **DataFrame Content:**
 

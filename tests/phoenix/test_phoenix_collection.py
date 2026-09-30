@@ -348,7 +348,9 @@ class TestPhoenixCollectionDataFrameOperations:
 
     def test_dataframe_shape(self, phoenix_dataframe):
         """Test dataframe has expected shape."""
-        assert phoenix_dataframe.shape == (12, 19)
+        # 8 td_150 files, and 12 bursts in each of the 4 td_24k files with
+        # data, one row each; the 19 collection columns and segment
+        assert phoenix_dataframe.shape == (56, 20)
 
     def test_dataframe_dtypes(self, phoenix_collection_real_data, phoenix_dataframe):
         """Test dataframe data types are set correctly."""
@@ -388,8 +390,10 @@ class TestPhoenixCollectionDataFrameOperations:
             phoenix_dataframe.sample_rate == 24000
         ].run.unique()
 
-        assert len(run_names_24k) == 1
+        # one run per burst: the td_24k file of each channel holds 12
+        assert len(run_names_24k) == 12
         assert run_names_24k[0] == "sr24k_0001"
+        assert run_names_24k[-1] == "sr24k_0012"
 
     def test_to_dataframe_skip_calibration_files(self, mock_station_directory):
         """Test that calibration files are skipped."""
@@ -490,7 +494,8 @@ class TestPhoenixCollectionRunOperations:
 
     def test_runs_keys(self, phoenix_runs, test_station):
         """Test runs dictionary has expected structure."""
-        assert len(phoenix_runs[test_station].keys()) == 2  # 150Hz and 24kHz runs
+        # one 150 Hz run and one run per 24 kHz burst
+        assert len(phoenix_runs[test_station].keys()) == 13
         assert isinstance(phoenix_runs, OrderedDict)
 
     def test_runs_data_consistency(self, phoenix_dataframe, phoenix_runs, test_station):

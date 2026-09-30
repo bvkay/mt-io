@@ -289,13 +289,22 @@ class Segment(SubHeader):
         """
         Read the segment data from the file stream.
 
+        With ``metadata_only`` the samples are stepped over, so the stream
+        is left at the next sub-header either way. At the end of the file,
+        where no whole sub-header is left, the segment has no header.
+
         Parameters
         ----------
         metadata_only : bool, optional
             If True, only read metadata without loading data, by default False
         """
         self.unpack_header(self.stream)
-        if not metadata_only and self.n_samples is not None:
+        if self._header is None or len(self._header) < self.header_length:
+            self._header = None
+            return
+        if metadata_only:
+            self.stream.seek(4 * self.n_samples, 1)
+        else:
             self.data = np.fromfile(self.stream, dtype=np.float32, count=self.n_samples)
 
     @property
@@ -331,12 +340,117 @@ class Segment(SubHeader):
         return None
 
 
+def _read_segments(
+    reader: DecimatedSegmentedReader | DecimatedSegmentCollection,
+    metadata_only: bool = False,
+) -> list[Segment]:
+    """
+    Read every segment of a segmented file, from the first sub-header.
+
+    The walk starts after the file header each time, so it can be repeated
+    on the same reader, and stops where no whole sub-header is left.
+
+    Parameters
+    ----------
+    reader : DecimatedSegmentedReader or DecimatedSegmentCollection
+        Reader with an open stream
+    metadata_only : bool, optional
+        If True, read the sub-headers and step over the samples, by default
+        False
+
+    Returns
+    -------
+    list[Segment]
+        One Segment per burst, in file order; ``segment`` is its position,
+        0 for the first
+
+    Raises
+    ------
+    ValueError
+        If stream is not available
+    """
+    if reader.stream is None:
+        raise ValueError("Stream is not available")
+    kwargs = {
+        "instrument_type": reader.instrument_type,
+        "instrument_serial_number": reader.instrument_serial_number,
+        "latitude": reader.gps_lat,
+        "longitude": reader.gps_long,
+        "elevation": reader.gps_elevation,
+        "sample_rate": reader.sample_rate,
+        "channel_id": reader.channel_id,
+        "channel_type": reader.channel_type,
+    }
+    reader.stream.seek(reader.header_length)
+    segments = []
+    while True:
+        segment = Segment(reader.stream, segment=len(segments), **kwargs)
+        segment.read_segment(metadata_only=metadata_only)
+        if not segment._has_header():
+            break
+        if segment.data is not None and segment.data.size < segment.n_samples:
+            reader.logger.warning(
+                f"{reader.file_name}: segment {segment.segment} holds "
+                f"{segment.data.size} of {segment.n_samples} samples, the file "
+                "ends part way through it"
+            )
+        segments.append(segment)
+    reader.logger.debug(f"Read {len(segments)} segments from {reader.file_name}")
+    return segments
+
+
+def _segments_to_channel_ts(
+    reader: DecimatedSegmentedReader | DecimatedSegmentCollection,
+    rxcal_fn: str | Path | None = None,
+    scal_fn: str | Path | None = None,
+) -> list[ChannelTS]:
+    """
+    Make one ChannelTS per segment, each starting at its own GPS stamp.
+
+    Parameters
+    ----------
+    reader : DecimatedSegmentedReader or DecimatedSegmentCollection
+        Reader with an open stream
+    rxcal_fn : str, Path or None, optional
+        Path to receiver calibration file, by default None
+    scal_fn : str, Path or None, optional
+        Path to sensor calibration file, by default None
+
+    Returns
+    -------
+    list[ChannelTS]
+        One ChannelTS per segment, in file order
+    """
+    seq_list = []
+    for segment in _read_segments(reader):
+        ch_metadata = reader._update_channel_metadata_from_recmeta()
+        if segment.segment_start_time is not None:
+            ch_metadata.time_period.start = segment.segment_start_time.isoformat()
+        if segment.segment_end_time is not None:
+            ch_metadata.time_period.end = segment.segment_end_time.isoformat()
+
+        seq_list.append(
+            ChannelTS(
+                channel_type=ch_metadata.type,
+                data=segment.data,
+                channel_metadata=ch_metadata,
+                run_metadata=reader.run_metadata,
+                station_metadata=reader.station_metadata,
+                channel_response=reader.get_channel_response(
+                    rxcal_fn=rxcal_fn, scal_fn=scal_fn
+                ),
+            )
+        )
+    return seq_list
+
+
 class DecimatedSegmentedReader(TSReaderBase):
     """
     Class to create a streamer for segmented decimated time series.
 
     This reader handles segmented decimated time series files such as 'td_24k'.
-    These files have sub headers containing metadata for each segment.
+    These files hold a burst per segment, each with a sub header giving its
+    GPS stamp and sample count; ``to_channel_ts`` returns every burst.
 
     Parameters
     ----------
@@ -416,11 +530,32 @@ class DecimatedSegmentedReader(TSReaderBase):
 
         return segment
 
+    def read_segments(self, metadata_only: bool = False) -> list[Segment]:
+        """
+        Read every segment of the file, from the first sub-header.
+
+        Parameters
+        ----------
+        metadata_only : bool, optional
+            If True, read the sub-headers and step over the samples, by
+            default False
+
+        Returns
+        -------
+        list[Segment]
+            One Segment per burst, in file order
+        """
+        return _read_segments(self, metadata_only=metadata_only)
+
     def to_channel_ts(
         self, rxcal_fn: str | Path | None = None, scal_fn: str | Path | None = None
-    ) -> ChannelTS:
+    ) -> list[ChannelTS]:
         """
-        Convert to a ChannelTS object.
+        Convert every segment of the file to a ChannelTS.
+
+        A td_24k file holds a burst per segment (12 bursts of 2 s, 30 s
+        apart, in a 6 minute MTU-8A file), so each becomes its own
+        ChannelTS starting at its GPS stamp.
 
         Parameters
         ----------
@@ -431,28 +566,10 @@ class DecimatedSegmentedReader(TSReaderBase):
 
         Returns
         -------
-        ChannelTS
-            Channel time series object with data, metadata, and calibration
+        list[ChannelTS]
+            One ChannelTS per segment, in file order
         """
-        segment = self.read_segment()
-        ch_metadata = self.channel_metadata
-
-        # Set timing information if available
-        if segment.segment_start_time is not None:
-            ch_metadata.time_period.start = segment.segment_start_time.isoformat()
-        if segment.segment_end_time is not None:
-            ch_metadata.time_period.end = segment.segment_end_time.isoformat()
-
-        return ChannelTS(
-            channel_type=ch_metadata.type,
-            data=segment.data,
-            channel_metadata=ch_metadata,
-            run_metadata=self.run_metadata,
-            station_metadata=self.station_metadata,
-            channel_response=self.get_channel_response(
-                rxcal_fn=rxcal_fn, scal_fn=scal_fn
-            ),
-        )
+        return _segments_to_channel_ts(self, rxcal_fn=rxcal_fn, scal_fn=scal_fn)
 
 
 class DecimatedSegmentCollection(TSReaderBase):
@@ -504,12 +621,13 @@ class DecimatedSegmentCollection(TSReaderBase):
 
     def read_segments(self, metadata_only: bool = False) -> list[Segment]:
         """
-        Read all segments from the file.
+        Read all segments from the file, from the first sub-header.
 
         Parameters
         ----------
         metadata_only : bool, optional
-            If True, only read metadata without loading data, by default False
+            If True, read the sub-headers and step over the samples, by
+            default False
 
         Returns
         -------
@@ -521,35 +639,7 @@ class DecimatedSegmentCollection(TSReaderBase):
         ValueError
             If stream is not available
         """
-        kwargs = {
-            "instrument_type": self.instrument_type,
-            "instrument_serial_number": self.instrument_serial_number,
-            "latitude": self.gps_lat,
-            "longitude": self.gps_long,
-            "elevation": self.gps_elevation,
-            "sample_rate": self.sample_rate,
-            "channel_id": self.channel_id,
-            "channel_type": self.channel_type,
-            "segment": 0,
-        }
-
-        if self.stream is None:
-            raise ValueError("Stream is not available")
-
-        segments = []
-        count = 1
-        while True:
-            try:
-                kwargs["segment"] = count
-                segment = Segment(self.stream, **kwargs)
-                segment.read_segment(metadata_only=metadata_only)
-                segments.append(segment)
-                count += 1
-            except Exception:
-                break
-        self.logger.info(f"Read {count - 1} segments")
-
-        return segments
+        return _read_segments(self, metadata_only=metadata_only)
 
     def to_channel_ts(
         self, rxcal_fn: str | Path | None = None, scal_fn: str | Path | None = None
@@ -569,22 +659,4 @@ class DecimatedSegmentCollection(TSReaderBase):
         list[ChannelTS]
             List of ChannelTS objects, one for each segment
         """
-        seq_list = []
-        for seq in self.read_segments():
-            ch_metadata = self.channel_metadata
-            if seq.gps_time_stamp is not None:
-                ch_metadata.time_period.start = seq.gps_time_stamp.isoformat()
-
-            seq_list.append(
-                ChannelTS(
-                    channel_type=ch_metadata.type,
-                    data=seq.data,
-                    channel_metadata=ch_metadata,
-                    run_metadata=self.run_metadata,
-                    station_metadata=self.station_metadata,
-                    channel_response=self.get_channel_response(
-                        rxcal_fn=rxcal_fn, scal_fn=scal_fn
-                    ),
-                )
-            )
-        return seq_list
+        return _segments_to_channel_ts(self, rxcal_fn=rxcal_fn, scal_fn=scal_fn)

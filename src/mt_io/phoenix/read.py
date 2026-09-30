@@ -99,12 +99,15 @@ def open_phoenix(
     return READERS[extension](file_name, **kwargs)
 
 
-def read_phoenix(file_name: str | Path, **kwargs: Any) -> ChannelTS | RunTS | MTUTable:
+def read_phoenix(
+    file_name: str | Path, **kwargs: Any
+) -> ChannelTS | list[ChannelTS] | RunTS | MTUTable:
     """
     Read a Phoenix Geophysics data file into a ChannelTS or RunTS object
     depending on the file type.  Newer files that end in .td_XX or .bin will be
-    read into ChannelTS objects.  Older MTU files that end in .TS3, .TS4, .TS5,
-    .TSL, or .TSH will be read into RunTS objects.
+    read into ChannelTS objects; a segmented .td_24k file gives a list of them,
+    one per burst.  Older MTU files that end in .TS3, .TS4, .TS5, .TSL, or .TSH
+    will be read into RunTS objects.
 
     Parameters
     ----------
@@ -126,6 +129,10 @@ def read_phoenix(file_name: str | Path, **kwargs: Any) -> ChannelTS | RunTS | MT
     channel_ts : ChannelTS
         Time series data object containing the Phoenix file data
         with calibration applied if calibration files were provided.
+
+    channel_ts_list : list[ChannelTS]
+        For a segmented .td_24k file, one ChannelTS per burst in file
+        order, each starting at its own GPS stamp.
 
     run_ts : RunTS
         Time series data object containing the MTU data from the Phoenix MTU
